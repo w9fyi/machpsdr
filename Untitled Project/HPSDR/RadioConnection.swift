@@ -219,6 +219,14 @@ actor RadioConnection {
     func setTXEQGains(preamp: Int, low: Int, mid: Int, high: Int) {
         wdspTx.setEQGains(preamp: preamp, low: low, mid: mid, high: high)
     }
+    /// CESSB (Controlled Envelope SSB) overshoot control.
+    func setCESSB(_ on: Bool) { wdspTx.setCESSB(on) }
+
+    /// RX 3-band graphic EQ.
+    func setRXEQ(on: Bool) { wdsp.setEQ(on: on) }
+    func setRXEQGains(preamp: Int, low: Int, mid: Int, high: Int) {
+        wdsp.setEQGains(preamp: preamp, low: low, mid: mid, high: high)
+    }
 
     /// Sets the 7-bit open-collector output pattern (amp band data). Applied on the
     /// next config command frame (a few ms).

@@ -136,6 +136,10 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private var nb2Mode: Int32 = 0           // 0 zero, 1 sample-hold, 2 mean-hold, 3 hold-sample, 4 interpolate
     private var nb2Threshold: Double = 3.0
 
+    // RX 3-band graphic equalizer
+    private var rxEqOn = false
+    private var rxEqGains: [Int32] = [0, 0, 0, 0]   // [preamp, low, mid, high] in dB
+
     init(ring: AudioRingBuffer) {
         self.ring = ring
         inBuffer = [Double](repeating: 0, count: WDSPRadio.bufferSize * 2)
@@ -167,6 +171,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         applyMode()
         applyNoiseReduction()
         applyNoiseBlanker()
+        applyEQ()
         _ = SetChannelState(Self.channelID, 1, 0)
     }
 
@@ -303,6 +308,24 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     func setNoiseBlanker2Threshold(_ threshold: Double) {
         nb2Threshold = threshold
         if isOpen { SetEXTNOBThreshold(nbID, threshold) }
+    }
+
+    /// Enables/disables the RX 3-band graphic equalizer.
+    func setEQ(on: Bool) {
+        rxEqOn = on
+        if isOpen { SetRXAEQRun(Self.channelID, on ? 1 : 0) }
+    }
+
+    /// Sets RX EQ gains in dB: overall preamp plus low/mid/high bands.
+    func setEQGains(preamp: Int, low: Int, mid: Int, high: Int) {
+        rxEqGains = [Int32(preamp), Int32(low), Int32(mid), Int32(high)]
+        if isOpen { SetRXAGrphEQ(Self.channelID, &rxEqGains) }
+    }
+
+    /// Pushes the current RX EQ gains and run state to the open channel.
+    private func applyEQ() {
+        SetRXAGrphEQ(Self.channelID, &rxEqGains)
+        SetRXAEQRun(Self.channelID, rxEqOn ? 1 : 0)
     }
 
     /// Re-applies blanker state after the EXT instances are (re)created on open.

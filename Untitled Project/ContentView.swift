@@ -102,6 +102,14 @@ final class RadioSession {
     var txEQLow = 0
     var txEQMid = 0
     var txEQHigh = 0
+    // RX equalizer
+    var rxEQ = false
+    var rxEQPreamp = 0
+    var rxEQLow = 0
+    var rxEQMid = 0
+    var rxEQHigh = 0
+    // CESSB (controlled-envelope SSB overshoot control)
+    var cessb = false
     let midi = MIDIManager()
     let bandData = BandDataStore()
     private var currentBandOC: UInt8 = 0
@@ -428,6 +436,29 @@ final class RadioSession {
     func setTXEQMid(_ v: Int) { txEQMid = v; pushTXEQGains() }
     func setTXEQHigh(_ v: Int) { txEQHigh = v; pushTXEQGains() }
 
+    func setCESSB(_ on: Bool) {
+        cessb = on
+        let conn = connection
+        Task { await conn?.setCESSB(on) }
+    }
+
+    func setRXEQ(_ on: Bool) {
+        rxEQ = on
+        let conn = connection
+        Task { await conn?.setRXEQ(on: on) }
+    }
+
+    private func pushRXEQGains() {
+        let conn = connection
+        let p = rxEQPreamp, l = rxEQLow, m = rxEQMid, h = rxEQHigh
+        Task { await conn?.setRXEQGains(preamp: p, low: l, mid: m, high: h) }
+    }
+
+    func setRXEQPreamp(_ v: Int) { rxEQPreamp = v; pushRXEQGains() }
+    func setRXEQLow(_ v: Int) { rxEQLow = v; pushRXEQGains() }
+    func setRXEQMid(_ v: Int) { rxEQMid = v; pushRXEQGains() }
+    func setRXEQHigh(_ v: Int) { rxEQHigh = v; pushRXEQGains() }
+
     /// Sends a raw open-collector pattern to the radio (live; used for amp band
     /// data and for calibration). No effect if not connected.
     func setOpenCollector(_ value: UInt8) {
@@ -520,6 +551,9 @@ final class RadioSession {
         let txLo = txLowCut, txHi = txHighCut
         let txeqOn = txEQ
         let txeqP = txEQPreamp, txeqL = txEQLow, txeqM = txEQMid, txeqH = txEQHigh
+        let rxeqOn = rxEQ
+        let rxeqP = rxEQPreamp, rxeqL = rxEQLow, rxeqM = rxEQMid, rxeqH = rxEQHigh
+        let cessbOn = cessb
         // Detect the band for the current frequency so the amp is set on connect.
         var bandOC: UInt8?
         if bandData.enabled, let band = Band.band(for: frequencyHz) {
@@ -556,6 +590,9 @@ final class RadioSession {
             await conn?.setTXBandwidth(low: txLo, high: txHi)
             await conn?.setTXEQGains(preamp: txeqP, low: txeqL, mid: txeqM, high: txeqH)
             await conn?.setTXEQ(on: txeqOn)
+            await conn?.setCESSB(cessbOn)
+            await conn?.setRXEQGains(preamp: rxeqP, low: rxeqL, mid: rxeqM, high: rxeqH)
+            await conn?.setRXEQ(on: rxeqOn)
             if let bandOC { await conn?.setOpenCollector(bandOC) }
         }
     }
@@ -701,6 +738,9 @@ struct RadioDetailView: View {
                     }
                     Section("Noise Reduction") {
                         noiseReductionControls
+                    }
+                    Section("RX Equalizer") {
+                        rxAudioControls
                     }
                     Section("Transmit") {
                         transmitControls
@@ -1044,6 +1084,21 @@ struct RadioDetailView: View {
         }
     }
 
+    /// RX 3-band graphic equalizer.
+    @ViewBuilder
+    private var rxAudioControls: some View {
+        Toggle("RX Equalizer", isOn: Binding(
+            get: { session.rxEQ },
+            set: { session.setRXEQ($0) }
+        ))
+        if session.rxEQ {
+            eqSlider("Preamp", value: session.rxEQPreamp) { session.setRXEQPreamp($0) }
+            eqSlider("Low", value: session.rxEQLow) { session.setRXEQLow($0) }
+            eqSlider("Mid", value: session.rxEQMid) { session.setRXEQMid($0) }
+            eqSlider("High", value: session.rxEQHigh) { session.setRXEQHigh($0) }
+        }
+    }
+
     /// TX passband (low/high cut) and the 3-band transmit equalizer.
     @ViewBuilder
     private var txAudioControls: some View {
@@ -1075,15 +1130,22 @@ struct RadioDetailView: View {
             set: { session.setTXEQ($0) }
         ))
         if session.txEQ {
-            txEQSlider("Preamp", value: session.txEQPreamp) { session.setTXEQPreamp($0) }
-            txEQSlider("Low", value: session.txEQLow) { session.setTXEQLow($0) }
-            txEQSlider("Mid", value: session.txEQMid) { session.setTXEQMid($0) }
-            txEQSlider("High", value: session.txEQHigh) { session.setTXEQHigh($0) }
+            eqSlider("Preamp", value: session.txEQPreamp) { session.setTXEQPreamp($0) }
+            eqSlider("Low", value: session.txEQLow) { session.setTXEQLow($0) }
+            eqSlider("Mid", value: session.txEQMid) { session.setTXEQMid($0) }
+            eqSlider("High", value: session.txEQHigh) { session.setTXEQHigh($0) }
         }
+        Toggle("CESSB (Controlled Envelope SSB)", isOn: Binding(
+            get: { session.cessb },
+            set: { session.setCESSB($0) }
+        ))
+        Text("Tames SSB envelope overshoot so you can run more average power for the same peak. Pairs well with the speech processor.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 
-    /// One ±12 dB EQ band row.
-    private func txEQSlider(_ label: String, value: Int, onChange: @escaping (Int) -> Void) -> some View {
+    /// One ±12 dB EQ band row (shared by TX and RX equalizers).
+    private func eqSlider(_ label: String, value: Int, onChange: @escaping (Int) -> Void) -> some View {
         HStack {
             Text(label).frame(width: 60, alignment: .leading)
             Slider(value: Binding(

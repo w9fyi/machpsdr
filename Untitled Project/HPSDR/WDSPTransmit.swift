@@ -19,6 +19,7 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
     private var txHigh: Double = 2800
     private var eqOn = false
     private var eqGains: [Int32] = [0, 0, 0, 0]   // [preamp, low, mid, high] in dB
+    private var cessbOn = false                    // CESSB overshoot control (W9GR)
 
     private var inBuffer: [Double]      // interleaved (mic, 0)
     private var outBuffer: [Double]     // interleaved TX I/Q
@@ -46,6 +47,7 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
         SetTXACompressorGain(Self.channelID, 3.0)
         SetTXACompressorRun(Self.channelID, 0)   // speech processor off by default
         applyEQ()
+        SetTXAosctrlRun(Self.channelID, cessbOn ? 1 : 0)
         _ = SetChannelState(Self.channelID, 1, 0)
         isOpen = true
     }
@@ -91,6 +93,13 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
     private func applyEQ() {
         SetTXAGrphEQ(Self.channelID, &eqGains)
         SetTXAEQRun(Self.channelID, eqOn ? 1 : 0)
+    }
+
+    /// Enables/disables CESSB (Controlled Envelope SSB) overshoot control, which tames
+    /// SSB envelope peaks so you can run more average power for the same PEP.
+    func setCESSB(_ on: Bool) {
+        cessbOn = on
+        if isOpen { SetTXAosctrlRun(Self.channelID, on ? 1 : 0) }
     }
 
     /// Enables/disables the WDSP speech processor (compressor) with a gain in dB.
