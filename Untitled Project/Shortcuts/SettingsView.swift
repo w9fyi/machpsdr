@@ -1,0 +1,216 @@
+import SwiftUI
+
+/// The app's Settings window (App ▸ Settings, ⌘,). Currently hosts the keyboard
+/// shortcuts pane; future "set-and-forget" configuration panes can be added as tabs.
+struct SettingsView: View {
+    var body: some View {
+        TabView {
+            ShortcutsSettingsView()
+                .tabItem { Label("Shortcuts", systemImage: "keyboard") }
+            AudioSettingsView()
+                .tabItem { Label("Audio", systemImage: "mic") }
+            BandDataSettingsView()
+                .tabItem { Label("Band Data", systemImage: "fibrechannel") }
+        }
+        .frame(width: 480, height: 500)
+    }
+}
+
+/// Configures amplifier band data (open-collector outputs) and provides a
+/// calibration tool to map raw OC values to the band the amplifier reports.
+struct BandDataSettingsView: View {
+    @Environment(RadioSession.self) private var session
+    @State private var testValue: Double = 0
+
+    var body: some View {
+        Form {
+            Section("Amplifier Band Data") {
+                Toggle("Send band data on band change", isOn: Binding(
+                    get: { session.bandData.enabled },
+                    set: { session.bandData.setEnabled($0) }
+                ))
+                Text("Drives the radio's open-collector outputs so an amplifier follows the band. Verify the codes match your amp before enabling and transmitting.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Calibrate (no RF)") {
+                Text("Connect the radio, then step this value and watch which band your amplifier reports. Setting OC outputs does not transmit.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Stepper(value: $testValue, in: 0...127) {
+                    Text("Test output: \(Int(testValue)) — \(pinList(UInt8(testValue)))")
+                        .monospacedDigit()
+                }
+                .onChange(of: testValue) { _, newValue in
+                    session.setOpenCollector(UInt8(newValue))
+                }
+            }
+
+            Section("Per-Band Values") {
+                ForEach(Band.all) { band in
+                    Stepper(value: Binding(
+                        get: { Double(session.bandData.value(for: band.id)) },
+                        set: { session.bandData.setValue(UInt8($0), for: band.id) }
+                    ), in: 0...127) {
+                        Text("\(band.name): \(session.bandData.value(for: band.id))")
+                            .monospacedDigit()
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    /// Lists which OC pins (1–7) are active for a value.
+    private func pinList(_ value: UInt8) -> String {
+        let pins = (0..<7).filter { value & (1 << $0) != 0 }.map { "OC\($0 + 1)" }
+        return pins.isEmpty ? "no pins" : pins.joined(separator: "+")
+    }
+}
+
+/// Chooses which CoreAudio input device feeds the transmitter's microphone path.
+struct AudioSettingsView: View {
+    @Environment(RadioSession.self) private var session
+    @State private var devices: [AudioInputDevice] = []
+
+    var body: some View {
+        Form {
+            Section("Microphone") {
+                Picker("Input Device", selection: Binding(
+                    get: { session.selectedMicUID },
+                    set: { session.setMicDevice($0) }
+                )) {
+                    Text("System Default").tag(String?.none)
+                    ForEach(devices) { device in
+                        Text(device.name).tag(Optional(device.id))
+                    }
+                }
+                Text("This device's audio is sent on SSB/AM/FM voice transmit. A change takes effect the next time you key up.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Refresh Devices") { devices = AudioDevices.inputDevices() }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { devices = AudioDevices.inputDevices() }
+    }
+}
+
+/// Lists keyboard-shortcut bindings and provides the Add (capture → assign) flow.
+struct ShortcutsSettingsView: View {
+    @Environment(ShortcutStore.self) private var store
+
+    @State private var capture = KeyCaptureController()
+    @State private var isRecording = false
+    @State private var capturedCombo: KeyCombo?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Keyboard Shortcuts")
+                .font(.headline)
+            Text("Press Add, then press the key combination you want, then choose the function to assign it to.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            List {
+                if store.bindings.isEmpty {
+                    Text("No shortcuts yet.")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(store.bindings) { binding in
+                    HStack {
+                        Text(binding.combo.display)
+                            .font(.body.monospaced())
+                            .frame(minWidth: 80, alignment: .leading)
+                        Text(ShortcutCommand.name(for: binding.commandID))
+                        Spacer()
+                        Button(role: .destructive) {
+                            store.remove(binding)
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Remove \(binding.combo.display) \(ShortcutCommand.name(for: binding.commandID))")
+                    }
+                }
+            }
+
+            Button {
+                startRecording()
+            } label: {
+                Label("Add", systemImage: "plus")
+            }
+        }
+        .padding()
+        // Recording prompt.
+        .sheet(isPresented: $isRecording) {
+            VStack(spacing: 16) {
+                Image(systemName: "keyboard")
+                    .font(.largeTitle)
+                Text("Press a key combination")
+                    .font(.headline)
+                Text("It will be assigned in the next step.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Cancel") {
+                    capture.cancel()
+                    isRecording = false
+                }
+            }
+            .padding(30)
+            .frame(minWidth: 280)
+        }
+        // Assignment step.
+        .sheet(item: $capturedCombo) { combo in
+            CommandPicker(combo: combo) { commandID in
+                store.add(combo: combo, commandID: commandID)
+                capturedCombo = nil
+            } onCancel: {
+                capturedCombo = nil
+            }
+        }
+    }
+
+    private func startRecording() {
+        isRecording = true
+        capture.start { combo in
+            isRecording = false
+            capturedCombo = combo
+        }
+    }
+}
+
+/// A grouped list of assignable functions shown after a combo is captured.
+private struct CommandPicker: View {
+    let combo: KeyCombo
+    let onAssign: (String) -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Assign \(combo.display) to:")
+                .font(.headline)
+            List {
+                ForEach(ShortcutCommand.categories, id: \.self) { category in
+                    Section(category) {
+                        ForEach(ShortcutCommand.all.filter { $0.category == category }) { command in
+                            Button(command.name) { onAssign(command.id) }
+                        }
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+            }
+        }
+        .padding()
+        .frame(width: 380, height: 460)
+    }
+}
+
+// Allow KeyCombo to drive `.sheet(item:)`.
+extension KeyCombo: Identifiable {
+    var id: String { "\(keyCode)-\(modifiers)" }
+}

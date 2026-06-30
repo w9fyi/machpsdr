@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Xcode build / derived data
+build/
+DerivedData/
+*.xcuserstate
+
+# Xcode user-specific state (keep shared project/scheme data)
+xcuserdata/
+
+# Backups created by helper scripts
+*.bak
+*.bak.*
+
+# Compiled object/library artifacts
+*.o
+*.a
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Upstream WDSP reference clone (has its own .git; we build from WDSPKit/Sources/CWDSP)
+wdsp-src/

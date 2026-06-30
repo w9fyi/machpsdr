@@ -1,0 +1,708 @@
+import SwiftUI
+
+@main struct MyApp: App {
+    @State private var session = RadioSession()
+    @State private var shortcuts = ShortcutStore()
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+                .environment(session)
+                .environment(shortcuts)
+        }
+        .defaultSize(width: 760, height: 520)
+
+        Settings {
+            SettingsView()
+                .environment(shortcuts)
+                .environment(session)
+        }
+    }
+}
+
+/// Observable model that scans the local network for HPSDR radios.
+@MainActor
+@Observable
+final class RadioBrowser {
+    var radios: [DiscoveredRadio] = []
+    var isScanning = false
+    var errorMessage: String?
+
+    private let discovery = RadioDiscovery()
+
+    func scan() async {
+        isScanning = true
+        errorMessage = nil
+        defer { isScanning = false }
+        do {
+            radios = try await discovery.discover()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+/// Owns the live connection to a single radio and surfaces its state to the UI.
+@MainActor
+@Observable
+final class RadioSession {
+    enum State: Equatable {
+        case disconnected
+        case connecting
+        case streaming
+        case failed(String)
+    }
+
+    private(set) var state: State = .disconnected
+    private(set) var lastUpdate: StreamUpdate?
+    var frequencyHz: UInt32 = 7_100_000
+    var sampleRate: HPSDRProtocol1.SampleRate = .rate48k
+    var mode: RadioMode = .usb
+    var volume: Float = 0.5
+    var noiseReduction = false
+    var cwPitch: Double = 600
+    var filterWidth: Double = 250
+    var filterLow: Double = 150
+    var filterHigh: Double = 2850
+    var midiTuningEnabled = false
+    var midiTuningStepHz = 100
+    var isTransmitting = false
+    var isTuning = false
+    var driveLevel: Double = 10   // percent; starts low for safety
+    var micGain: Double = 1.0     // linear
+    /// Selected mic input device UID (nil = macOS default input). Persisted.
+    var selectedMicUID: String?
+    var speechProcessor = false
+    var speechProcessorLevel: Double = 3.0  // dB
+    let midi = MIDIManager()
+    let bandData = BandDataStore()
+    private var currentBandOC: UInt8 = 0
+    private var lastBandID: String?
+
+    init() {
+        selectedMicUID = UserDefaults.standard.string(forKey: "selectedMicUID")
+        midi.onTuneStep = { [weak self] steps in
+            guard let self, self.midiTuningEnabled else { return }
+            self.tuneBy(steps: steps)
+        }
+        midi.start()
+    }
+
+    /// Adjusts the receiver frequency by `steps` tuning detents.
+    func tuneBy(steps: Int) {
+        let delta = steps * midiTuningStepHz
+        let newFrequency = max(0, Int(frequencyHz) + delta)
+        setFrequency(UInt32(newFrequency))
+    }
+
+    private var connection: RadioConnection?
+    private var consumeTask: Task<Void, Never>?
+    /// Live spectrum buffer for the panadapter/waterfall (nil when disconnected).
+    private(set) var spectrumBuffer: SpectrumBuffer?
+    /// Most recently connected radio, used by the connect/disconnect shortcut.
+    private(set) var lastRadio: DiscoveredRadio?
+
+    var isConnected: Bool { state == .streaming }
+
+    func connect(to radio: DiscoveredRadio) {
+        disconnect()
+        lastRadio = radio
+        state = .connecting
+        var settings = RadioSettings()
+        settings.sampleRate = sampleRate
+        settings.receiverFrequencies = [frequencyHz]
+        settings.transmitFrequency = frequencyHz
+        let conn = RadioConnection(radio: radio, settings: settings)
+        connection = conn
+        spectrumBuffer = conn.spectrum
+        consumeTask = Task {
+            do {
+                try await conn.start()
+            } catch {
+                self.state = .failed(error.localizedDescription)
+                return
+            }
+            self.state = .streaming
+            self.applyAudioSettings()
+            for await update in await conn.updates {
+                self.lastUpdate = update
+            }
+        }
+    }
+
+    func disconnect() {
+        consumeTask?.cancel()
+        consumeTask = nil
+        let conn = connection
+        connection = nil
+        spectrumBuffer = nil
+        lastUpdate = nil
+        isTransmitting = false
+        isTuning = false
+        state = .disconnected
+        Task { await conn?.stop() }
+    }
+
+    func setFrequency(_ hz: UInt32) {
+        frequencyHz = hz
+        let conn = connection
+        Task { await conn?.setFrequency(hz) }
+        updateBandData(for: hz)
+    }
+
+    /// Auto-updates amp band data when the frequency crosses into a different band.
+    private func updateBandData(for hz: UInt32) {
+        guard bandData.enabled,
+              let band = Band.band(for: hz),
+              band.id != lastBandID else { return }
+        lastBandID = band.id
+        currentBandOC = bandData.value(for: band.id)
+        setOpenCollector(currentBandOC)
+    }
+
+    func setSampleRate(_ rate: HPSDRProtocol1.SampleRate) {
+        sampleRate = rate
+        let conn = connection
+        Task { await conn?.setSampleRate(rate) }
+    }
+
+    func setMode(_ newMode: RadioMode) {
+        mode = newMode
+        // Mirror WDSP's per-mode filter defaults so the sliders stay in sync.
+        filterWidth = newMode.defaultWidth
+        filterLow = newMode.defaultLow
+        filterHigh = newMode.defaultHigh
+        let conn = connection
+        Task { await conn?.setMode(newMode) }
+    }
+
+    func setFilterWidth(_ width: Double) {
+        filterWidth = width
+        let conn = connection
+        Task { await conn?.setFilterWidth(width) }
+    }
+
+    func setLowCut(_ hz: Double) {
+        filterLow = hz
+        let conn = connection
+        Task { await conn?.setLowCut(hz) }
+    }
+
+    func setHighCut(_ hz: Double) {
+        filterHigh = hz
+        let conn = connection
+        Task { await conn?.setHighCut(hz) }
+    }
+
+    func setCWPitch(_ hz: Double) {
+        cwPitch = hz
+        let conn = connection
+        Task { await conn?.setCWPitch(hz) }
+    }
+
+    func setVolume(_ newVolume: Float) {
+        volume = newVolume
+        let conn = connection
+        Task { await conn?.setVolume(newVolume) }
+    }
+
+    func setNoiseReduction(_ on: Bool) {
+        noiseReduction = on
+        let conn = connection
+        Task { await conn?.setNoiseReduction(on) }
+    }
+
+    private var driveByte: UInt8 { UInt8(max(0, min(255, driveLevel / 100 * 255))) }
+
+    func setPTT(_ on: Bool) {
+        isTransmitting = on
+        if on { isTuning = false }
+        let conn = connection
+        Task { await conn?.setTransmit(on) }
+    }
+
+    func setTune(_ on: Bool) {
+        isTuning = on
+        if on { isTransmitting = false }
+        let conn = connection
+        Task { await conn?.setTune(on) }
+    }
+
+    func setDrive(_ percent: Double) {
+        driveLevel = percent
+        let conn = connection
+        let level = driveByte
+        Task { await conn?.setDrive(level) }
+    }
+
+    func setMicGain(_ gain: Double) {
+        micGain = gain
+        let conn = connection
+        Task { await conn?.setMicGain(gain) }
+    }
+
+    /// Selects the mic input device by UID (nil = system default), persists it, and
+    /// forwards to the connection. Takes effect on the next key-down.
+    func setMicDevice(_ uid: String?) {
+        selectedMicUID = uid
+        UserDefaults.standard.set(uid, forKey: "selectedMicUID")
+        let conn = connection
+        Task { await conn?.setInputDevice(uid: uid) }
+    }
+
+    func setSpeechProcessor(_ on: Bool) {
+        speechProcessor = on
+        let conn = connection
+        let level = speechProcessorLevel
+        Task { await conn?.setSpeechProcessor(on, gain: level) }
+    }
+
+    func setSpeechProcessorLevel(_ level: Double) {
+        speechProcessorLevel = level
+        let conn = connection
+        let on = speechProcessor
+        Task { await conn?.setSpeechProcessor(on, gain: level) }
+    }
+
+    /// Sends a raw open-collector pattern to the radio (live; used for amp band
+    /// data and for calibration). No effect if not connected.
+    func setOpenCollector(_ value: UInt8) {
+        let conn = connection
+        Task { await conn?.setOpenCollector(value) }
+    }
+
+
+
+    /// Connects to the last radio if disconnected, or disconnects if connected.
+    func toggleConnection() {
+        if isConnected {
+            disconnect()
+        } else if let radio = lastRadio {
+            connect(to: radio)
+        }
+    }
+
+    /// Runs a keyboard-shortcut command by its id.
+    func execute(commandID id: String) {
+        if id.hasPrefix("band.") {
+            let bandID = String(id.dropFirst("band.".count))
+            if let band = Band.all.first(where: { $0.id == bandID }) {
+                setMode(band.mode)
+                setFrequency(band.frequencyHz)   // also updates amp band data
+            }
+        } else if id.hasPrefix("mode.") {
+            let raw = String(id.dropFirst("mode.".count))
+            if let newMode = RadioMode(rawValue: raw) { setMode(newMode) }
+        } else {
+            switch id {
+            case "tune.up":         tuneBy(steps: 1)
+            case "tune.down":       tuneBy(steps: -1)
+            case "filter.narrower": adjustFilter(narrower: true)
+            case "filter.wider":    adjustFilter(narrower: false)
+            case "nr.toggle":       setNoiseReduction(!noiseReduction)
+            case "volume.up":       setVolume(min(1, volume + 0.05))
+            case "volume.down":     setVolume(max(0, volume - 0.05))
+            case "tx.ptt":          setPTT(!isTransmitting)
+            case "tx.tune":         setTune(!isTuning)
+            case "drive.up":        setDrive(min(100, driveLevel + 5))
+            case "drive.down":      setDrive(max(0, driveLevel - 5))
+            case "connection.toggle": toggleConnection()
+            default: break
+            }
+        }
+    }
+
+    private func adjustFilter(narrower: Bool) {
+        let sign: Double = narrower ? -1 : 1
+        if mode.filterStyle == .cw {
+            let range = mode.widthRange
+            setFilterWidth(min(range.upperBound, max(range.lowerBound, filterWidth + sign * 50)))
+        } else {
+            let range = mode.highCutRange
+            setHighCut(min(range.upperBound, max(range.lowerBound, filterHigh + sign * 100)))
+        }
+    }
+
+    /// Pushes the current mode/volume/NR to a freshly-started connection.
+    private func applyAudioSettings() {
+        let conn = connection
+        let m = mode
+        let v = volume
+        let nr = noiseReduction
+        let pitch = cwPitch
+        let width = filterWidth
+        let low = filterLow
+        let high = filterHigh
+        let drive = driveByte
+        let mg = micGain
+        let micUID = selectedMicUID
+        let sp = speechProcessor
+        let spl = speechProcessorLevel
+        // Detect the band for the current frequency so the amp is set on connect.
+        var bandOC: UInt8?
+        if bandData.enabled, let band = Band.band(for: frequencyHz) {
+            lastBandID = band.id
+            currentBandOC = bandData.value(for: band.id)
+            bandOC = currentBandOC
+        }
+        Task {
+            await conn?.setMode(m)
+            await conn?.setVolume(v)
+            await conn?.setNoiseReduction(nr)
+            await conn?.setCWPitch(pitch)
+            await conn?.setFilterWidth(width)
+            await conn?.setLowCut(low)
+            await conn?.setHighCut(high)
+            await conn?.setDrive(drive)
+            await conn?.setMicGain(mg)
+            await conn?.setInputDevice(uid: micUID)
+            await conn?.setSpeechProcessor(sp, gain: spl)
+            if let bandOC { await conn?.setOpenCollector(bandOC) }
+        }
+    }
+}
+
+struct ContentView: View {
+    @Environment(RadioSession.self) private var session
+    @Environment(ShortcutStore.self) private var shortcuts
+    @State private var browser = RadioBrowser()
+    @State private var selection: DiscoveredRadio.ID?
+    @State private var keyMonitor = ShortcutKeyMonitor()
+
+    var body: some View {
+        NavigationSplitView {
+            radioList
+                .navigationTitle("Radios")
+                .toolbar {
+                    ToolbarItem {
+                        Button {
+                            Task { await browser.scan() }
+                        } label: {
+                            Label("Scan", systemImage: "antenna.radiowaves.left.and.right")
+                        }
+                        .disabled(browser.isScanning)
+                    }
+                }
+        } detail: {
+            detail
+        }
+        .task {
+            await browser.scan()
+        }
+        .onAppear { keyMonitor.install(store: shortcuts, session: session) }
+        .onDisappear { keyMonitor.remove() }
+    }
+
+    @ViewBuilder
+    private var radioList: some View {
+        List(selection: $selection) {
+            if let errorMessage = browser.errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+            }
+            ForEach(browser.radios) { radio in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(radio.board.displayName)
+                        .font(.headline)
+                    Text(radio.ipAddress)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 2)
+                .tag(radio.id)
+            }
+        }
+        .overlay {
+            if browser.isScanning && browser.radios.isEmpty {
+                ProgressView("Scanning…")
+            } else if browser.radios.isEmpty {
+                ContentUnavailableView(
+                    "No radios found",
+                    systemImage: "antenna.radiowaves.left.and.right.slash",
+                    description: Text("Make sure your ANAN-10E is powered on and on the same network, then scan again.")
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        if let selection, let radio = browser.radios.first(where: { $0.id == selection }) {
+            RadioDetailView(radio: radio, session: session)
+        } else {
+            ContentUnavailableView("Select a radio", systemImage: "dot.radiowaves.left.and.right")
+        }
+    }
+}
+
+/// Radio detail: connection controls, tuning, and a live status readout proving the I/Q stream.
+struct RadioDetailView: View {
+    let radio: DiscoveredRadio
+    @Bindable var session: RadioSession
+
+    /// Frequency shown in the text field, in MHz.
+    @State private var frequencyMHz: Double = 7.1
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if session.isConnected, let spectrum = session.spectrumBuffer {
+                SpectrumView(spectrum: spectrum) { hz in
+                    session.setFrequency(hz)
+                    frequencyMHz = Double(hz) / 1_000_000
+                }
+                .frame(minHeight: 260)
+            }
+
+            Form {
+                Section("Radio") {
+                    LabeledContent("Board", value: radio.board.displayName)
+                    LabeledContent("IP Address", value: radio.ipAddress)
+                    LabeledContent("MAC Address", value: radio.macAddress)
+                    LabeledContent("Firmware", value: radio.firmwareVersion)
+                }
+
+                Section("Connection") {
+                    connectionControls
+                }
+
+                Section("MIDI Tuning") {
+                    midiControls
+                }
+
+                if session.isConnected {
+                    Section("Tuning") {
+                        tuningControls
+                    }
+                    Section("Transmit") {
+                        transmitControls
+                    }
+                    Section("Live Stream") {
+                        liveStatus
+                    }
+                }
+            }
+            .formStyle(.grouped)
+        }
+        .navigationTitle(radio.board.displayName)
+        .onChange(of: radio.id) { _, _ in
+            session.disconnect()
+        }
+        // Keep the frequency field in sync with MIDI/click tuning.
+        .onChange(of: session.frequencyHz) { _, newValue in
+            frequencyMHz = Double(newValue) / 1_000_000
+        }
+        .onAppear { frequencyMHz = Double(session.frequencyHz) / 1_000_000 }
+        .onDisappear { session.disconnect() }
+    }
+
+    /// Mode-appropriate filter controls: CW pitch+width, SSB/DIGI low+high cut,
+    /// or a single bandwidth for AM/SAM/FM.
+    @ViewBuilder
+    private var transmitControls: some View {
+        HStack {
+            Toggle("Transmit", isOn: Binding(
+                get: { session.isTransmitting },
+                set: { session.setPTT($0) }
+            ))
+            .toggleStyle(.button)
+            .tint(.red)
+            Toggle("Tune", isOn: Binding(
+                get: { session.isTuning },
+                set: { session.setTune($0) }
+            ))
+            .toggleStyle(.button)
+            .tint(.red)
+        }
+        HStack {
+            Text("Drive")
+            Slider(value: Binding(
+                get: { session.driveLevel },
+                set: { session.setDrive($0) }
+            ), in: 0...100, step: 1)
+            Text("\(Int(session.driveLevel)) %")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        HStack {
+            Text("Mic Gain")
+            Slider(value: Binding(
+                get: { session.micGain },
+                set: { session.setMicGain($0) }
+            ), in: 0...4, step: 0.1)
+            Text(String(format: "%.1f×", session.micGain))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        Toggle("Speech Processor", isOn: Binding(
+            get: { session.speechProcessor },
+            set: { session.setSpeechProcessor($0) }
+        ))
+        if session.speechProcessor {
+            HStack {
+                Text("Processor Level")
+                Slider(value: Binding(
+                    get: { session.speechProcessorLevel },
+                    set: { session.setSpeechProcessorLevel($0) }
+                ), in: 0...15, step: 0.5)
+                Text(String(format: "%.0f dB", session.speechProcessorLevel))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+        }
+        if session.isTransmitting || session.isTuning {
+            Label("Transmitting", systemImage: "dot.radiowaves.left.and.right")
+                .foregroundStyle(.red)
+        }
+    }
+
+    @ViewBuilder
+    private var filterControls: some View {
+        switch session.mode.filterStyle {
+        case .cw:
+            labeledSlider("CW Pitch", value: session.cwPitch, range: 300...1000) { session.setCWPitch($0) }
+            labeledSlider("Width", value: session.filterWidth, range: session.mode.widthRange) { session.setFilterWidth($0) }
+        case .lowHigh:
+            labeledSlider("Low Cut", value: session.filterLow, range: session.mode.lowCutRange) { session.setLowCut($0) }
+            labeledSlider("High Cut", value: session.filterHigh, range: session.mode.highCutRange) { session.setHighCut($0) }
+        case .bandwidth:
+            labeledSlider("Bandwidth", value: session.filterHigh, range: session.mode.highCutRange) { session.setHighCut($0) }
+        }
+    }
+
+    private func labeledSlider(_ label: String,
+                               value: Double,
+                               range: ClosedRange<Double>,
+                               onChange: @escaping (Double) -> Void) -> some View {
+        HStack {
+            Text(label)
+            Slider(value: Binding(get: { value }, set: { onChange($0) }), in: range, step: 10)
+            Text("\(Int(value)) Hz").monospacedDigit().foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var midiControls: some View {
+        if session.midi.sourceNames.isEmpty {
+            Label("No MIDI device detected", systemImage: "pianokeys")
+                .foregroundStyle(.secondary)
+        } else {
+            ForEach(session.midi.sourceNames, id: \.self) { name in
+                Label(name, systemImage: "pianokeys")
+            }
+        }
+        Toggle("Tune with MIDI knob", isOn: $session.midiTuningEnabled)
+        Picker("Tuning Step", selection: $session.midiTuningStepHz) {
+            Text("10 Hz").tag(10)
+            Text("100 Hz").tag(100)
+            Text("1 kHz").tag(1000)
+        }
+        Button("Rescan MIDI") { session.midi.rescan() }
+        // Always-visible monitor — a DisclosureGroup was not operable via VoiceOver.
+        Text("Monitor (recent MIDI)")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        if session.midi.log.isEmpty {
+            Text("Turn the knob or press a button to see messages.")
+                .foregroundStyle(.secondary)
+        } else {
+            ForEach(session.midi.log.suffix(6)) { entry in
+                Text(entry.text).font(.caption.monospaced())
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var connectionControls: some View {
+        switch session.state {
+        case .disconnected:
+            Button("Connect") { session.connect(to: radio) }
+        case .connecting:
+            HStack { ProgressView().controlSize(.small); Text("Connecting…") }
+        case .streaming:
+            Button("Disconnect", role: .destructive) { session.disconnect() }
+        case .failed(let message):
+            VStack(alignment: .leading) {
+                Label(message, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
+                Button("Retry") { session.connect(to: radio) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var tuningControls: some View {
+        HStack {
+            Text("Frequency")
+            Spacer()
+            TextField("MHz", value: $frequencyMHz, format: .number.precision(.fractionLength(6)))
+                .frame(width: 120)
+                .multilineTextAlignment(.trailing)
+                .onSubmit { session.setFrequency(UInt32((frequencyMHz * 1_000_000).rounded())) }
+            Text("MHz").foregroundStyle(.secondary)
+        }
+        Picker("Sample Rate", selection: Binding(
+            get: { session.sampleRate },
+            set: { session.setSampleRate($0) }
+        )) {
+            ForEach(HPSDRProtocol1.SampleRate.allCases, id: \.self) { rate in
+                Text("\(rate.hertz / 1000) kHz").tag(rate)
+            }
+        }
+        // Default (pop-up menu) picker style — avoids the VoiceOver focus trap
+        // that the segmented style caused in the mode selector.
+        Picker("Mode", selection: Binding(
+            get: { session.mode },
+            set: { session.setMode($0) }
+        )) {
+            ForEach(RadioMode.allCases) { mode in
+                Text(mode.rawValue).tag(mode)
+            }
+        }
+        filterControls
+        HStack {
+            Image(systemName: "speaker.fill")
+            Slider(value: Binding(
+                get: { Double(session.volume) },
+                set: { session.setVolume(Float($0)) }
+            ), in: 0...1)
+            Image(systemName: "speaker.wave.3.fill")
+        }
+        Toggle("Noise Reduction", isOn: Binding(
+            get: { session.noiseReduction },
+            set: { session.setNoiseReduction($0) }
+        ))
+    }
+
+    @ViewBuilder
+    private var liveStatus: some View {
+        let update = session.lastUpdate
+        LabeledContent("Packet Rate", value: update.map { "\($0.packetsPerSecond) /s" } ?? "—")
+        LabeledContent("Sequence Gaps", value: update.map { "\($0.sequenceGaps)" } ?? "—")
+        LabeledContent("ADC Overflow") {
+            Image(systemName: (update?.status.adcOverflow ?? false) ? "exclamationmark.triangle.fill" : "checkmark.circle")
+                .foregroundStyle((update?.status.adcOverflow ?? false) ? .red : .green)
+        }
+        LabeledContent("PTT") {
+            Image(systemName: (update?.status.ptt ?? false) ? "mic.fill" : "mic.slash")
+                .foregroundStyle((update?.status.ptt ?? false) ? .red : .secondary)
+        }
+        signalMeter(rms: update?.signalRMS ?? 0)
+    }
+
+    @ViewBuilder
+    private func signalMeter(rms: Float) -> some View {
+        let dbfs = rms > 0 ? 20 * log10(rms) : -120
+        let fraction = max(0, min(1, (Double(dbfs) + 120) / 120))
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Signal Level")
+                Spacer()
+                Text(String(format: "%.0f dBFS", dbfs)).foregroundStyle(.secondary).monospacedDigit()
+            }
+            ProgressView(value: fraction)
+        }
+    }
+}
+
+#Preview {
+    ContentView()
+}

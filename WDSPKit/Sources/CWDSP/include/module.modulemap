@@ -1,0 +1,4 @@
+module CWDSP {
+    umbrella header "wdsp.h"
+    export *
+}
