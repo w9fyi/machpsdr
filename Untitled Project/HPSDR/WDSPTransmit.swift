@@ -14,6 +14,12 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
     private var mode: RadioMode = .usb
     private var micGain: Double = 1.0
 
+    // TX audio shaping: SSB passband edges (audio Hz) and a 3-band graphic EQ.
+    private var txLow: Double = 100
+    private var txHigh: Double = 2800
+    private var eqOn = false
+    private var eqGains: [Int32] = [0, 0, 0, 0]   // [preamp, low, mid, high] in dB
+
     private var inBuffer: [Double]      // interleaved (mic, 0)
     private var outBuffer: [Double]     // interleaved TX I/Q
     private var iqScratch: [Float]
@@ -39,6 +45,7 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
         applyMode()
         SetTXACompressorGain(Self.channelID, 3.0)
         SetTXACompressorRun(Self.channelID, 0)   // speech processor off by default
+        applyEQ()
         _ = SetChannelState(Self.channelID, 1, 0)
         isOpen = true
     }
@@ -57,6 +64,34 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
     }
 
     func setMicGain(_ gain: Double) { micGain = max(0, gain) }
+
+    /// Sets the SSB transmit passband edges (audio Hz). Applied immediately when open.
+    func setTXBandwidth(low: Double, high: Double) {
+        txLow = low
+        txHigh = high
+        if isOpen {
+            SetTXABandpassFreqs(Self.channelID, -txHigh, -txLow)
+            SetTXABandpassRun(Self.channelID, 1)
+        }
+    }
+
+    /// Enables/disables the TX 3-band graphic equalizer.
+    func setEQ(on: Bool) {
+        eqOn = on
+        if isOpen { SetTXAEQRun(Self.channelID, on ? 1 : 0) }
+    }
+
+    /// Sets TX EQ gains in dB: overall preamp plus low/mid/high bands.
+    func setEQGains(preamp: Int, low: Int, mid: Int, high: Int) {
+        eqGains = [Int32(preamp), Int32(low), Int32(mid), Int32(high)]
+        if isOpen { SetTXAGrphEQ(Self.channelID, &eqGains) }
+    }
+
+    /// Pushes the current EQ gains and run state to the open channel.
+    private func applyEQ() {
+        SetTXAGrphEQ(Self.channelID, &eqGains)
+        SetTXAEQRun(Self.channelID, eqOn ? 1 : 0)
+    }
 
     /// Enables/disables the WDSP speech processor (compressor) with a gain in dB.
     func setSpeechProcessor(_ on: Bool, gain: Double) {
@@ -83,7 +118,8 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
         SetTXAMode(Self.channelID, mode.wdspCode)
         // WDSP TXA only produces output with a negative-frequency passband; the
         // mode sets the actual sideband. (Sideband polarity verified on-air.)
-        SetTXABandpassFreqs(Self.channelID, -mode.defaultHigh, -mode.defaultLow)
+        // Edges come from the user-adjustable TX passband.
+        SetTXABandpassFreqs(Self.channelID, -txHigh, -txLow)
         SetTXABandpassRun(Self.channelID, 1)
     }
 

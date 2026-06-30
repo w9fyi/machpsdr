@@ -213,6 +213,13 @@ actor RadioConnection {
         wdspTx.setSpeechProcessor(on, gain: gain)
     }
 
+    /// TX audio shaping: passband edges and 3-band graphic EQ.
+    func setTXBandwidth(low: Double, high: Double) { wdspTx.setTXBandwidth(low: low, high: high) }
+    func setTXEQ(on: Bool) { wdspTx.setEQ(on: on) }
+    func setTXEQGains(preamp: Int, low: Int, mid: Int, high: Int) {
+        wdspTx.setEQGains(preamp: preamp, low: low, mid: mid, high: high)
+    }
+
     /// Sets the 7-bit open-collector output pattern (amp band data). Applied on the
     /// next config command frame (a few ms).
     func setOpenCollector(_ value: UInt8) {

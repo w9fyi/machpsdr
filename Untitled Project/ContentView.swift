@@ -94,6 +94,14 @@ final class RadioSession {
     var selectedOutputUID: String?
     var speechProcessor = false
     var speechProcessorLevel: Double = 3.0  // dB
+    // TX audio shaping
+    var txLowCut = 100.0
+    var txHighCut = 2800.0
+    var txEQ = false
+    var txEQPreamp = 0
+    var txEQLow = 0
+    var txEQMid = 0
+    var txEQHigh = 0
     let midi = MIDIManager()
     let bandData = BandDataStore()
     private var currentBandOC: UInt8 = 0
@@ -389,6 +397,37 @@ final class RadioSession {
         Task { await conn?.setSpeechProcessor(on, gain: level) }
     }
 
+    func setTXLowCut(_ hz: Double) {
+        txLowCut = hz
+        let conn = connection
+        let low = txLowCut, high = txHighCut
+        Task { await conn?.setTXBandwidth(low: low, high: high) }
+    }
+
+    func setTXHighCut(_ hz: Double) {
+        txHighCut = hz
+        let conn = connection
+        let low = txLowCut, high = txHighCut
+        Task { await conn?.setTXBandwidth(low: low, high: high) }
+    }
+
+    func setTXEQ(_ on: Bool) {
+        txEQ = on
+        let conn = connection
+        Task { await conn?.setTXEQ(on: on) }
+    }
+
+    private func pushTXEQGains() {
+        let conn = connection
+        let p = txEQPreamp, l = txEQLow, m = txEQMid, h = txEQHigh
+        Task { await conn?.setTXEQGains(preamp: p, low: l, mid: m, high: h) }
+    }
+
+    func setTXEQPreamp(_ v: Int) { txEQPreamp = v; pushTXEQGains() }
+    func setTXEQLow(_ v: Int) { txEQLow = v; pushTXEQGains() }
+    func setTXEQMid(_ v: Int) { txEQMid = v; pushTXEQGains() }
+    func setTXEQHigh(_ v: Int) { txEQHigh = v; pushTXEQGains() }
+
     /// Sends a raw open-collector pattern to the radio (live; used for amp band
     /// data and for calibration). No effect if not connected.
     func setOpenCollector(_ value: UInt8) {
@@ -478,6 +517,9 @@ final class RadioSession {
         let micUID = selectedMicUID
         let sp = speechProcessor
         let spl = speechProcessorLevel
+        let txLo = txLowCut, txHi = txHighCut
+        let txeqOn = txEQ
+        let txeqP = txEQPreamp, txeqL = txEQLow, txeqM = txEQMid, txeqH = txEQHigh
         // Detect the band for the current frequency so the amp is set on connect.
         var bandOC: UInt8?
         if bandData.enabled, let band = Band.band(for: frequencyHz) {
@@ -511,6 +553,9 @@ final class RadioSession {
             await conn?.setMicGain(mg)
             await conn?.setInputDevice(uid: micUID)
             await conn?.setSpeechProcessor(sp, gain: spl)
+            await conn?.setTXBandwidth(low: txLo, high: txHi)
+            await conn?.setTXEQGains(preamp: txeqP, low: txeqL, mid: txeqM, high: txeqH)
+            await conn?.setTXEQ(on: txeqOn)
             if let bandOC { await conn?.setOpenCollector(bandOC) }
         }
     }
@@ -659,6 +704,9 @@ struct RadioDetailView: View {
                     }
                     Section("Transmit") {
                         transmitControls
+                    }
+                    Section("TX Audio") {
+                        txAudioControls
                     }
                     Section("Live Stream") {
                         liveStatus
@@ -993,6 +1041,58 @@ struct RadioDetailView: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    /// TX passband (low/high cut) and the 3-band transmit equalizer.
+    @ViewBuilder
+    private var txAudioControls: some View {
+        HStack {
+            Text("TX Low")
+            Slider(value: Binding(
+                get: { session.txLowCut },
+                set: { session.setTXLowCut($0) }
+            ), in: 0...1000, step: 10)
+            Text("\(Int(session.txLowCut)) Hz")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        HStack {
+            Text("TX High")
+            Slider(value: Binding(
+                get: { session.txHighCut },
+                set: { session.setTXHighCut($0) }
+            ), in: 2000...4000, step: 50)
+            Text("\(Int(session.txHighCut)) Hz")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        Text("Narrow (e.g. 100–2800 Hz) for punch and DX; wider for ESSB ragchew audio.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        Toggle("TX Equalizer", isOn: Binding(
+            get: { session.txEQ },
+            set: { session.setTXEQ($0) }
+        ))
+        if session.txEQ {
+            txEQSlider("Preamp", value: session.txEQPreamp) { session.setTXEQPreamp($0) }
+            txEQSlider("Low", value: session.txEQLow) { session.setTXEQLow($0) }
+            txEQSlider("Mid", value: session.txEQMid) { session.setTXEQMid($0) }
+            txEQSlider("High", value: session.txEQHigh) { session.setTXEQHigh($0) }
+        }
+    }
+
+    /// One ±12 dB EQ band row.
+    private func txEQSlider(_ label: String, value: Int, onChange: @escaping (Int) -> Void) -> some View {
+        HStack {
+            Text(label).frame(width: 60, alignment: .leading)
+            Slider(value: Binding(
+                get: { Double(value) },
+                set: { onChange(Int($0.rounded())) }
+            ), in: -12...12, step: 1)
+            Text("\(value > 0 ? "+" : "")\(value) dB")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
         }
     }
 
