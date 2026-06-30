@@ -247,8 +247,10 @@ actor RadioConnection {
     /// Noise reduction controls (RXA DSP). Applied live; restored on reconnect by RadioSession.
     func setSpectralNR(_ on: Bool) { wdsp.setSpectralNR(on) }
     func setSpectralNRGainMethod(_ method: Int) { wdsp.setSpectralNRGainMethod(method) }
+    func setSpectralNRNPEMethod(_ method: Int) { wdsp.setSpectralNRNPEMethod(method) }
     func setSpectralNRArtifactReduction(_ on: Bool) { wdsp.setSpectralNRArtifactReduction(on) }
     func setANR(_ on: Bool) { wdsp.setANR(on) }
+    func setANRStrength(_ taps: Int) { wdsp.setANRStrength(taps) }
     func setANF(_ on: Bool) { wdsp.setANF(on) }
 
     /// Tunes receiver `index` to `hz`. Applied on the next outgoing EP2 frame.

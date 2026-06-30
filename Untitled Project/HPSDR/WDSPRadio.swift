@@ -119,8 +119,10 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     // Noise reduction (RXA): EMNR spectral subtraction, ANR (LMS), ANF (auto-notch).
     private var emnrOn = false
     private var emnrGainMethod: Int32 = 2    // 0 linear, 1 log, 2 gamma (WDSP default)
+    private var emnrNPEMethod: Int32 = 0     // noise-power estimator: 0 OSMS, 1 MMSE
     private var emnrArtifact = true          // artifact (musical-noise) elimination
     private var anrOn = false
+    private var anrTaps: Int32 = 64          // ANR LMS filter length (strength)
     private var anfOn = false
 
     init(ring: AudioRingBuffer) {
@@ -208,6 +210,12 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         if isOpen { SetRXAEMNRgainMethod(Self.channelID, emnrGainMethod) }
     }
 
+    /// EMNR noise-power estimator: 0 = OSMS (minimum statistics), 1 = MMSE.
+    func setSpectralNRNPEMethod(_ method: Int) {
+        emnrNPEMethod = Int32(method)
+        if isOpen { SetRXAEMNRnpeMethod(Self.channelID, emnrNPEMethod) }
+    }
+
     /// EMNR artifact (musical-noise) reduction post-filter.
     func setSpectralNRArtifactReduction(_ on: Bool) {
         emnrArtifact = on
@@ -220,6 +228,12 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         if isOpen { SetRXAANRRun(Self.channelID, on ? 1 : 0) }
     }
 
+    /// ANR strength via LMS filter length (more taps = deeper reduction, more distortion).
+    func setANRStrength(_ taps: Int) {
+        anrTaps = Int32(max(16, min(128, taps)))
+        if isOpen { SetRXAANRVals(Self.channelID, anrTaps, 16, 0.0001, 0.1) }
+    }
+
     /// ANF: automatic notch filter (removes steady carriers/heterodynes).
     func setANF(_ on: Bool) {
         anfOn = on
@@ -229,8 +243,10 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     /// Re-applies all noise-reduction state to the freshly opened channel.
     private func applyNoiseReduction() {
         SetRXAEMNRgainMethod(Self.channelID, emnrGainMethod)
+        SetRXAEMNRnpeMethod(Self.channelID, emnrNPEMethod)
         SetRXAEMNRaeRun(Self.channelID, emnrArtifact ? 1 : 0)
         SetRXAEMNRRun(Self.channelID, emnrOn ? 1 : 0)
+        SetRXAANRVals(Self.channelID, anrTaps, 16, 0.0001, 0.1)
         SetRXAANRRun(Self.channelID, anrOn ? 1 : 0)
         SetRXAANFRun(Self.channelID, anfOn ? 1 : 0)
     }

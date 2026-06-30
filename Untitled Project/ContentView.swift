@@ -62,8 +62,10 @@ final class RadioSession {
     // Noise reduction (RXA DSP)
     var spectralNR = false              // EMNR spectral subtraction
     var spectralNRGainMethod = 2        // 0 linear, 1 log, 2 gamma
+    var spectralNRNPEMethod = 0         // 0 OSMS, 1 MMSE
     var spectralNRArtifact = true       // EMNR artifact (musical-noise) reduction
     var lmsNR = false                   // ANR (LMS)
+    var lmsNRStrength = 64              // ANR LMS filter taps (strength)
     var autoNotch = false               // ANF auto-notch
     var cwPitch: Double = 600
     var filterWidth: Double = 250
@@ -223,6 +225,12 @@ final class RadioSession {
         Task { await conn?.setSpectralNRGainMethod(method) }
     }
 
+    func setSpectralNRNPEMethod(_ method: Int) {
+        spectralNRNPEMethod = method
+        let conn = connection
+        Task { await conn?.setSpectralNRNPEMethod(method) }
+    }
+
     func setSpectralNRArtifact(_ on: Bool) {
         spectralNRArtifact = on
         let conn = connection
@@ -233,6 +241,12 @@ final class RadioSession {
         lmsNR = on
         let conn = connection
         Task { await conn?.setANR(on) }
+    }
+
+    func setLMSNRStrength(_ taps: Int) {
+        lmsNRStrength = taps
+        let conn = connection
+        Task { await conn?.setANRStrength(taps) }
     }
 
     func setAutoNotch(_ on: Bool) {
@@ -359,8 +373,10 @@ final class RadioSession {
         let v = volume
         let snr = spectralNR
         let snrGain = spectralNRGainMethod
+        let snrNPE = spectralNRNPEMethod
         let snrArt = spectralNRArtifact
         let anr = lmsNR
+        let anrStrength = lmsNRStrength
         let anf = autoNotch
         let pitch = cwPitch
         let width = filterWidth
@@ -382,8 +398,10 @@ final class RadioSession {
             await conn?.setMode(m)
             await conn?.setVolume(v)
             await conn?.setSpectralNRGainMethod(snrGain)
+            await conn?.setSpectralNRNPEMethod(snrNPE)
             await conn?.setSpectralNRArtifactReduction(snrArt)
             await conn?.setSpectralNR(snr)
+            await conn?.setANRStrength(anrStrength)
             await conn?.setANR(anr)
             await conn?.setANF(anf)
             await conn?.setCWPitch(pitch)
@@ -725,6 +743,13 @@ struct RadioDetailView: View {
                 Text("Log").tag(1)
                 Text("Gamma").tag(2)
             }
+            Picker("Noise Estimate", selection: Binding(
+                get: { session.spectralNRNPEMethod },
+                set: { session.setSpectralNRNPEMethod($0) }
+            )) {
+                Text("OSMS").tag(0)
+                Text("MMSE").tag(1)
+            }
             Toggle("Reduce Artifacts", isOn: Binding(
                 get: { session.spectralNRArtifact },
                 set: { session.setSpectralNRArtifact($0) }
@@ -734,6 +759,18 @@ struct RadioDetailView: View {
             get: { session.lmsNR },
             set: { session.setLMSNR($0) }
         ))
+        if session.lmsNR {
+            HStack {
+                Text("NR Strength")
+                Slider(value: Binding(
+                    get: { Double(session.lmsNRStrength) },
+                    set: { session.setLMSNRStrength(Int($0)) }
+                ), in: 16...128, step: 8)
+                Text("\(session.lmsNRStrength)")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+        }
         Toggle("Auto-Notch (ANF)", isOn: Binding(
             get: { session.autoNotch },
             set: { session.setAutoNotch($0) }
