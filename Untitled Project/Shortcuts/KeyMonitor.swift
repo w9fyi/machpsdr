@@ -34,12 +34,28 @@ final class ShortcutKeyMonitor {
 
     func install(store: ShortcutStore, session: RadioSession) {
         remove()
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
+            // Push-to-talk: release transmit when the PTT-bound key is let go.
+            // Key-up is matched on key code only (modifiers may already be released)
+            // and never consumed, so it can't interfere with anything else.
+            if event.type == .keyUp {
+                if store.bindings.contains(where: { $0.commandID == "tx.ptt" && $0.combo.keyCode == event.keyCode }) {
+                    session.setPTT(false)
+                }
+                return event
+            }
+
             guard let commandID = store.commandID(for: event) else { return event }
             let combo = KeyCombo(event: event)
             if combo.hasNoModifiers,
                NSApp.keyWindow?.firstResponder is NSText {
                 return event // let plain keystrokes reach the text field
+            }
+            if commandID == "tx.ptt" {
+                // Hold to talk: key-down keys up the transmitter; auto-repeat is ignored;
+                // the matching key-up (above) drops back to receive.
+                if !event.isARepeat { session.setPTT(true) }
+                return nil
             }
             session.execute(commandID: commandID)
             return nil // consume

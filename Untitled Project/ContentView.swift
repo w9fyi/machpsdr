@@ -59,6 +59,7 @@ final class RadioSession {
     var sampleRate: HPSDRProtocol1.SampleRate = .rate48k
     var mode: RadioMode = .usb
     var volume: Float = 0.5
+    var muted = false
     // Noise reduction (RXA DSP)
     var spectralNR = false              // EMNR spectral subtraction
     var spectralNRGainMethod = 2        // 0 linear, 1 log, 2 gamma
@@ -225,7 +226,16 @@ final class RadioSession {
     func setVolume(_ newVolume: Float) {
         volume = newVolume
         let conn = connection
-        Task { await conn?.setVolume(newVolume) }
+        let effective = muted ? 0 : newVolume
+        Task { await conn?.setVolume(effective) }
+    }
+
+    /// Mutes/unmutes received audio without disturbing the volume setting.
+    func setMute(_ on: Bool) {
+        muted = on
+        let conn = connection
+        let effective: Float = on ? 0 : volume
+        Task { await conn?.setVolume(effective) }
     }
 
     func setSpectralNR(_ on: Bool) {
@@ -415,6 +425,7 @@ final class RadioSession {
             case "filter.narrower": adjustFilter(narrower: true)
             case "filter.wider":    adjustFilter(narrower: false)
             case "nr.toggle":       setSpectralNR(!spectralNR)
+            case "audio.mute":      setMute(!muted)
             case "volume.up":       setVolume(min(1, volume + 0.05))
             case "volume.down":     setVolume(max(0, volume - 0.05))
             case "tx.ptt":          setPTT(!isTransmitting)
@@ -442,7 +453,7 @@ final class RadioSession {
     private func applyAudioSettings() {
         let conn = connection
         let m = mode
-        let v = volume
+        let v = muted ? 0 : volume
         let snr = spectralNR
         let snrGain = spectralNRGainMethod
         let snrNPE = spectralNRNPEMethod
@@ -649,12 +660,22 @@ struct RadioDetailView: View {
     @ViewBuilder
     private var transmitControls: some View {
         HStack {
-            Toggle("Transmit", isOn: Binding(
-                get: { session.isTransmitting },
-                set: { session.setPTT($0) }
-            ))
-            .toggleStyle(.button)
-            .tint(.red)
+            // Push-to-talk: held down to transmit, released to receive.
+            Text("Transmit")
+                .fontWeight(.medium)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(session.isTransmitting ? Color.red : Color.secondary.opacity(0.2),
+                            in: RoundedRectangle(cornerRadius: 6))
+                .foregroundStyle(session.isTransmitting ? .white : .primary)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { _ in if !session.isTransmitting { session.setPTT(true) } }
+                        .onEnded { _ in session.setPTT(false) }
+                )
+                .accessibilityLabel("Transmit, push to talk")
+                .accessibilityAddTraits(.isButton)
             Toggle("Tune", isOn: Binding(
                 get: { session.isTuning },
                 set: { session.setTune($0) }
@@ -662,6 +683,9 @@ struct RadioDetailView: View {
             .toggleStyle(.button)
             .tint(.red)
         }
+        Text("Hold Transmit (or your assigned PTT shortcut) to talk; release to receive.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
         HStack {
             Text("Drive")
             Slider(value: Binding(
@@ -808,7 +832,14 @@ struct RadioDetailView: View {
         }
         filterControls
         HStack {
-            Image(systemName: "speaker.fill")
+            Button {
+                session.setMute(!session.muted)
+            } label: {
+                Image(systemName: session.muted ? "speaker.slash.fill" : "speaker.fill")
+                    .foregroundStyle(session.muted ? .red : .primary)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel(session.muted ? "Unmute" : "Mute")
             Slider(value: Binding(
                 get: { Double(session.volume) },
                 set: { session.setVolume(Float($0)) }

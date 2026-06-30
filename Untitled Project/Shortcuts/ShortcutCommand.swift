@@ -22,6 +22,7 @@ nonisolated struct ShortcutCommand: Identifiable, Hashable {
             ShortcutCommand(id: "filter.narrower",    category: "Action", name: "Filter Narrower"),
             ShortcutCommand(id: "filter.wider",       category: "Action", name: "Filter Wider"),
             ShortcutCommand(id: "nr.toggle",          category: "Action", name: "Toggle Noise Reduction"),
+            ShortcutCommand(id: "audio.mute",         category: "Action", name: "Toggle Mute"),
             ShortcutCommand(id: "volume.up",          category: "Action", name: "Volume Up"),
             ShortcutCommand(id: "volume.down",        category: "Action", name: "Volume Down"),
             ShortcutCommand(id: "tx.ptt",             category: "Action", name: "Transmit (PTT)"),
