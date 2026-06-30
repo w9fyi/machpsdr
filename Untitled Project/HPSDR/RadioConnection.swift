@@ -37,6 +37,8 @@ actor RadioConnection {
     // which `audioOutput` drains on the CoreAudio render thread.
     private let audioRing = AudioRingBuffer()
     private var audioOutput: AudioOutput?
+    /// Output device UID for received audio (nil = system default).
+    private var audioOutputUID: String?
     private let wdsp: WDSPRadio
     private var currentMode: RadioMode = .usb
 
@@ -102,7 +104,7 @@ actor RadioConnection {
         running.set(true)
 
         // Start audio output. If it fails, streaming still proceeds (silent).
-        let output = AudioOutput(ring: audioRing)
+        let output = AudioOutput(ring: audioRing, deviceUID: audioOutputUID)
         try? output.start()
         self.audioOutput = output
 
@@ -242,6 +244,30 @@ actor RadioConnection {
     /// Sets the audio output volume (0…1).
     func setVolume(_ volume: Float) {
         wdsp.setVolume(volume)
+    }
+
+    /// Selects the macOS output device (by UID) for received audio; nil = system default.
+    /// Re-routes immediately if currently streaming; otherwise applied when output starts.
+    func setOutputDevice(uid: String?) {
+        audioOutputUID = uid
+        if audioOutput != nil {
+            audioOutput?.stop()
+            let output = AudioOutput(ring: audioRing, deviceUID: uid)
+            try? output.start()
+            audioOutput = output
+        }
+    }
+
+    /// AGC time-constant profile (0 off … 4 fast).
+    func setAGCMode(_ mode: Int) { wdsp.setAGCMode(mode) }
+    /// AGC-T: maximum AGC gain in dB.
+    func setAGCTop(_ db: Double) { wdsp.setAGCTop(db) }
+
+    /// RX ADC step attenuator (0–31 dB; 0 = max gain). Applied on the next command frame.
+    func setRXAttenuator(_ db: UInt8) {
+        var s = settingsBox.current
+        s.rxAttenuator = db
+        settingsBox.current = s
     }
 
     /// Noise reduction controls (RXA DSP). Applied live; restored on reconnect by RadioSession.

@@ -90,11 +90,13 @@ nonisolated struct RadioSettings {
     var drive: UInt8 = 0
     /// 7-bit open-collector output pattern (J16/accessory port) for amp band data.
     var openCollector: UInt8 = 0
+    /// RX ADC step attenuator, 0–31 dB (0 = max gain / "preamp"). Sent in the 0x14 command.
+    var rxAttenuator: UInt8 = 0
 
     /// Number of distinct command "slots" cycled through round-robin:
     /// slot 0 = configuration, slot 1 = TX frequency, slot 2 = drive/mic,
-    /// slots 3… = each RX frequency.
-    var commandSlotCount: Int { 3 + receiverCount }
+    /// slot 3 = RX attenuator, slots 4… = each RX frequency.
+    var commandSlotCount: Int { 4 + receiverCount }
 
     /// Produces the five command bytes (C0–C4) for a given round-robin slot.
     func commandBytes(slot: Int) -> (UInt8, UInt8, UInt8, UInt8, UInt8) {
@@ -112,9 +114,13 @@ nonisolated struct RadioSettings {
         case 2:
             // Drive level / mic: C0 = 0x12, C1 = TX drive (0–255).
             return (0x12 | moxBit, drive, 0x00, 0x00, 0x00)
+        case 3:
+            // RX ADC step attenuator: C0 = 0x14, C4 = enable (0x20) | attenuation (0–31 dB).
+            // 0 dB = maximum sensitivity ("preamp"); higher values attenuate the front end.
+            return (0x14 | moxBit, 0x00, 0x00, 0x00, 0x20 | (rxAttenuator & 0x1F))
         default:
             // RX NCO frequency: C0 = 0x04 + receiverIndex*2.
-            let rx = slot - 3
+            let rx = slot - 4
             let c0 = UInt8(0x04 + rx * 2) | moxBit
             let hz = rx < receiverFrequencies.count ? receiverFrequencies[rx] : (receiverFrequencies.first ?? 0)
             return Self.frequencyCommand(c0: c0, hz: hz)

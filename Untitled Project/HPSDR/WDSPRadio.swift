@@ -110,6 +110,8 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private var audioScratch: [Float]
 
     private var volume: Double = 0.4
+    private var agcMode: Int32 = 3       // 0 off, 1 long, 2 slow, 3 medium, 4 fast
+    private var agcTop: Double = 90.0    // AGC-T: maximum gain in dB
     private var mode: RadioMode = .usb
     private var cwPitch: Double = 600
     private var filterWidth: Double = 250    // CW
@@ -157,8 +159,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
                       0.0001, 0.0001, 0.0001, 0.005, nbThreshold)
         create_nobEXT(nbID, 0, nb2Mode, Int32(Self.bufferSize), Double(Self.audioRate),
                       0.0001, 0.0001, 0.0001, 0.005, nb2Threshold)
-        SetRXAAGCMode(Self.channelID, 3)      // medium AGC
-        SetRXAAGCTop(Self.channelID, 90.0)
+        applyAGC()
         SetRXAPanelGain1(Self.channelID, volume)
         self.mode = mode
         resetFilterDefaults()
@@ -214,6 +215,23 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     func setVolume(_ v: Float) {
         volume = Double(max(0, min(1, v)))
         if isOpen { SetRXAPanelGain1(Self.channelID, volume) }
+    }
+
+    /// AGC time-constant profile: 0 off, 1 long, 2 slow, 3 medium, 4 fast.
+    func setAGCMode(_ mode: Int) {
+        agcMode = Int32(mode)
+        if isOpen { SetRXAAGCMode(Self.channelID, agcMode) }
+    }
+
+    /// AGC-T: the maximum gain (dB) the AGC applies — effectively the threshold knob.
+    func setAGCTop(_ db: Double) {
+        agcTop = db
+        if isOpen { SetRXAAGCTop(Self.channelID, db) }
+    }
+
+    private func applyAGC() {
+        SetRXAAGCMode(Self.channelID, agcMode)
+        SetRXAAGCTop(Self.channelID, agcTop)
     }
 
     /// EMNR spectral-subtraction noise reduction (on/off).

@@ -72,28 +72,48 @@ struct BandDataSettingsView: View {
 /// Chooses which CoreAudio input device feeds the transmitter's microphone path.
 struct AudioSettingsView: View {
     @Environment(RadioSession.self) private var session
-    @State private var devices: [AudioInputDevice] = []
+    @State private var inputs: [AudioDevice] = []
+    @State private var outputs: [AudioDevice] = []
 
     var body: some View {
         Form {
-            Section("Microphone") {
+            Section("Microphone (TX)") {
                 Picker("Input Device", selection: Binding(
                     get: { session.selectedMicUID },
                     set: { session.setMicDevice($0) }
                 )) {
                     Text("System Default").tag(String?.none)
-                    ForEach(devices) { device in
+                    ForEach(inputs) { device in
                         Text(device.name).tag(Optional(device.id))
                     }
                 }
                 Text("This device's audio is sent on SSB/AM/FM voice transmit. A change takes effect the next time you key up.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Button("Refresh Devices") { devices = AudioDevices.inputDevices() }
             }
+            Section("Receiver Audio (RX)") {
+                Picker("Output Device", selection: Binding(
+                    get: { session.selectedOutputUID },
+                    set: { session.setOutputDevice($0) }
+                )) {
+                    Text("System Default").tag(String?.none)
+                    ForEach(outputs) { device in
+                        Text(device.name).tag(Optional(device.id))
+                    }
+                }
+                Text("Where received audio plays. A change takes effect immediately while connected.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Button("Refresh Devices") { refresh() }
         }
         .formStyle(.grouped)
-        .onAppear { devices = AudioDevices.inputDevices() }
+        .onAppear { refresh() }
+    }
+
+    private func refresh() {
+        inputs = AudioDevices.inputDevices()
+        outputs = AudioDevices.outputDevices()
     }
 }
 

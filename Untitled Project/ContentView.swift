@@ -73,6 +73,10 @@ final class RadioSession {
     var noiseBlanker2 = false           // NOB
     var noiseBlanker2Mode = 0           // 0 zero, 1 sample-hold, 2 mean-hold, 3 hold-sample, 4 interpolate
     var noiseBlanker2Threshold = 3.0
+    // AGC + front-end gain
+    var agcMode = 3                     // 0 off, 1 long, 2 slow, 3 medium, 4 fast
+    var agcThreshold = 90.0             // AGC-T (max gain, dB)
+    var rxAttenuator = 0                // RX ADC step attenuator, 0-31 dB (0 = preamp)
     var cwPitch: Double = 600
     var filterWidth: Double = 250
     var filterLow: Double = 150
@@ -85,6 +89,8 @@ final class RadioSession {
     var micGain: Double = 1.0     // linear
     /// Selected mic input device UID (nil = macOS default input). Persisted.
     var selectedMicUID: String?
+    /// Selected output device UID for received audio (nil = macOS default output). Persisted.
+    var selectedOutputUID: String?
     var speechProcessor = false
     var speechProcessorLevel: Double = 3.0  // dB
     let midi = MIDIManager()
@@ -94,6 +100,7 @@ final class RadioSession {
 
     init() {
         selectedMicUID = UserDefaults.standard.string(forKey: "selectedMicUID")
+        selectedOutputUID = UserDefaults.standard.string(forKey: "selectedOutputUID")
         midi.onTuneStep = { [weak self] steps in
             guard let self, self.midiTuningEnabled else { return }
             self.tuneBy(steps: steps)
@@ -128,7 +135,9 @@ final class RadioSession {
         let conn = RadioConnection(radio: radio, settings: settings)
         connection = conn
         spectrumBuffer = conn.spectrum
+        let outUID = selectedOutputUID
         consumeTask = Task {
+            await conn.setOutputDevice(uid: outUID)
             do {
                 try await conn.start()
             } catch {
@@ -291,6 +300,24 @@ final class RadioSession {
         Task { await conn?.setNoiseBlanker2Threshold(threshold) }
     }
 
+    func setAGCMode(_ mode: Int) {
+        agcMode = mode
+        let conn = connection
+        Task { await conn?.setAGCMode(mode) }
+    }
+
+    func setAGCThreshold(_ db: Double) {
+        agcThreshold = db
+        let conn = connection
+        Task { await conn?.setAGCTop(db) }
+    }
+
+    func setRXAttenuator(_ db: Int) {
+        rxAttenuator = db
+        let conn = connection
+        Task { await conn?.setRXAttenuator(UInt8(db)) }
+    }
+
     private var driveByte: UInt8 { UInt8(max(0, min(255, driveLevel / 100 * 255))) }
 
     func setPTT(_ on: Bool) {
@@ -327,6 +354,15 @@ final class RadioSession {
         UserDefaults.standard.set(uid, forKey: "selectedMicUID")
         let conn = connection
         Task { await conn?.setInputDevice(uid: uid) }
+    }
+
+    /// Selects the output device by UID (nil = system default), persists it, and
+    /// forwards to the connection. Re-routes received audio immediately if streaming.
+    func setOutputDevice(_ uid: String?) {
+        selectedOutputUID = uid
+        UserDefaults.standard.set(uid, forKey: "selectedOutputUID")
+        let conn = connection
+        Task { await conn?.setOutputDevice(uid: uid) }
     }
 
     func setSpeechProcessor(_ on: Bool) {
@@ -419,6 +455,9 @@ final class RadioSession {
         let nb2 = noiseBlanker2
         let nb2Mode = noiseBlanker2Mode
         let nb2Thresh = noiseBlanker2Threshold
+        let agc = agcMode
+        let agcT = agcThreshold
+        let atten = rxAttenuator
         let pitch = cwPitch
         let width = filterWidth
         let low = filterLow
@@ -450,6 +489,9 @@ final class RadioSession {
             await conn?.setNoiseBlanker2Mode(nb2Mode)
             await conn?.setNoiseBlanker2Threshold(nb2Thresh)
             await conn?.setNoiseBlanker2(nb2)
+            await conn?.setAGCMode(agc)
+            await conn?.setAGCTop(agcT)
+            await conn?.setRXAttenuator(UInt8(atten))
             await conn?.setCWPitch(pitch)
             await conn?.setFilterWidth(width)
             await conn?.setLowCut(low)
@@ -573,6 +615,9 @@ struct RadioDetailView: View {
                 if session.isConnected {
                     Section("Tuning") {
                         tuningControls
+                    }
+                    Section("AGC & RF Gain") {
+                        agcControls
                     }
                     Section("Noise Reduction") {
                         noiseReductionControls
@@ -770,6 +815,45 @@ struct RadioDetailView: View {
             ), in: 0...1)
             Image(systemName: "speaker.wave.3.fill")
         }
+    }
+
+    /// AGC time-constant profile, the AGC-T (max-gain) knob, and the RX front-end
+    /// step attenuator (0 dB = max gain / preamp).
+    @ViewBuilder
+    private var agcControls: some View {
+        Picker("AGC", selection: Binding(
+            get: { session.agcMode },
+            set: { session.setAGCMode($0) }
+        )) {
+            Text("Off").tag(0)
+            Text("Long").tag(1)
+            Text("Slow").tag(2)
+            Text("Medium").tag(3)
+            Text("Fast").tag(4)
+        }
+        HStack {
+            Text("AGC-T")
+            Slider(value: Binding(
+                get: { session.agcThreshold },
+                set: { session.setAGCThreshold($0) }
+            ), in: -20...120, step: 1)
+            Text("\(Int(session.agcThreshold)) dB")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        HStack {
+            Text("RX Atten")
+            Slider(value: Binding(
+                get: { Double(session.rxAttenuator) },
+                set: { session.setRXAttenuator(Int($0)) }
+            ), in: 0...31, step: 1)
+            Text("\(session.rxAttenuator) dB")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        Text("RX Atten 0 dB = maximum gain (preamp) for quiet bands like 20 m; raise it to tame strong signals or noise on the low bands.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 
     /// Receiver noise-reduction controls: EMNR spectral subtraction (with mode and
