@@ -42,6 +42,27 @@ final class RadioBrowser {
     }
 }
 
+/// Transmit audio processing presets. Higher tiers compress harder for more talk
+/// power; DX+ also enables CESSB (controlled-envelope SSB) for maximum average power.
+nonisolated enum TXProcessing: String, CaseIterable, Identifiable, Sendable {
+    case off = "Off"
+    case normal = "Normal"
+    case dx = "DX"
+    case dxPlus = "DX+"
+
+    var id: String { rawValue }
+    var compressorOn: Bool { self != .off }
+    var compressorGain: Double {
+        switch self {
+        case .off:    return 0
+        case .normal: return 3
+        case .dx:     return 7
+        case .dxPlus: return 10
+        }
+    }
+    var usesCESSB: Bool { self == .dxPlus }
+}
+
 /// Owns the live connection to a single radio and surfaces its state to the UI.
 @MainActor
 @Observable
@@ -92,8 +113,7 @@ final class RadioSession {
     var selectedMicUID: String?
     /// Selected output device UID for received audio (nil = macOS default output). Persisted.
     var selectedOutputUID: String?
-    var speechProcessor = false
-    var speechProcessorLevel: Double = 3.0  // dB
+    var txProcessing: TXProcessing = .off
     // TX audio shaping
     var txLowCut = 100.0
     var txHighCut = 2800.0
@@ -108,8 +128,7 @@ final class RadioSession {
     var rxEQLow = 0
     var rxEQMid = 0
     var rxEQHigh = 0
-    // CESSB (controlled-envelope SSB overshoot control)
-    var cessb = false
+
     let midi = MIDIManager()
     let bandData = BandDataStore()
     private var currentBandOC: UInt8 = 0
@@ -391,18 +410,17 @@ final class RadioSession {
         Task { await conn?.setOutputDevice(uid: uid) }
     }
 
-    func setSpeechProcessor(_ on: Bool) {
-        speechProcessor = on
+    /// Applies a transmit processing preset: compressor on/off + gain, and CESSB on DX+.
+    func setTXProcessing(_ profile: TXProcessing) {
+        txProcessing = profile
         let conn = connection
-        let level = speechProcessorLevel
-        Task { await conn?.setSpeechProcessor(on, gain: level) }
-    }
-
-    func setSpeechProcessorLevel(_ level: Double) {
-        speechProcessorLevel = level
-        let conn = connection
-        let on = speechProcessor
-        Task { await conn?.setSpeechProcessor(on, gain: level) }
+        let on = profile.compressorOn
+        let gain = profile.compressorGain
+        let cessb = profile.usesCESSB
+        Task {
+            await conn?.setSpeechProcessor(on, gain: gain)
+            await conn?.setCESSB(cessb)
+        }
     }
 
     func setTXLowCut(_ hz: Double) {
@@ -435,12 +453,6 @@ final class RadioSession {
     func setTXEQLow(_ v: Int) { txEQLow = v; pushTXEQGains() }
     func setTXEQMid(_ v: Int) { txEQMid = v; pushTXEQGains() }
     func setTXEQHigh(_ v: Int) { txEQHigh = v; pushTXEQGains() }
-
-    func setCESSB(_ on: Bool) {
-        cessb = on
-        let conn = connection
-        Task { await conn?.setCESSB(on) }
-    }
 
     func setRXEQ(_ on: Bool) {
         rxEQ = on
@@ -546,14 +558,12 @@ final class RadioSession {
         let drive = driveByte
         let mg = micGain
         let micUID = selectedMicUID
-        let sp = speechProcessor
-        let spl = speechProcessorLevel
+        let proc = txProcessing
         let txLo = txLowCut, txHi = txHighCut
         let txeqOn = txEQ
         let txeqP = txEQPreamp, txeqL = txEQLow, txeqM = txEQMid, txeqH = txEQHigh
         let rxeqOn = rxEQ
         let rxeqP = rxEQPreamp, rxeqL = rxEQLow, rxeqM = rxEQMid, rxeqH = rxEQHigh
-        let cessbOn = cessb
         // Detect the band for the current frequency so the amp is set on connect.
         var bandOC: UInt8?
         if bandData.enabled, let band = Band.band(for: frequencyHz) {
@@ -586,11 +596,11 @@ final class RadioSession {
             await conn?.setDrive(drive)
             await conn?.setMicGain(mg)
             await conn?.setInputDevice(uid: micUID)
-            await conn?.setSpeechProcessor(sp, gain: spl)
+            await conn?.setSpeechProcessor(proc.compressorOn, gain: proc.compressorGain)
             await conn?.setTXBandwidth(low: txLo, high: txHi)
             await conn?.setTXEQGains(preamp: txeqP, low: txeqL, mid: txeqM, high: txeqH)
             await conn?.setTXEQ(on: txeqOn)
-            await conn?.setCESSB(cessbOn)
+            await conn?.setCESSB(proc.usesCESSB)
             await conn?.setRXEQGains(preamp: rxeqP, low: rxeqL, mid: rxeqM, high: rxeqH)
             await conn?.setRXEQ(on: rxeqOn)
             if let bandOC { await conn?.setOpenCollector(bandOC) }
@@ -809,22 +819,6 @@ struct RadioDetailView: View {
             Text(String(format: "%.1f×", session.micGain))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-        }
-        Toggle("Speech Processor", isOn: Binding(
-            get: { session.speechProcessor },
-            set: { session.setSpeechProcessor($0) }
-        ))
-        if session.speechProcessor {
-            HStack {
-                Text("Processor Level")
-                Slider(value: Binding(
-                    get: { session.speechProcessorLevel },
-                    set: { session.setSpeechProcessorLevel($0) }
-                ), in: 0...15, step: 0.5)
-                Text(String(format: "%.0f dB", session.speechProcessorLevel))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
         }
         if session.isTransmitting || session.isTuning {
             Label("Transmitting", systemImage: "dot.radiowaves.left.and.right")
@@ -1135,11 +1129,15 @@ struct RadioDetailView: View {
             eqSlider("Mid", value: session.txEQMid) { session.setTXEQMid($0) }
             eqSlider("High", value: session.txEQHigh) { session.setTXEQHigh($0) }
         }
-        Toggle("CESSB (Controlled Envelope SSB)", isOn: Binding(
-            get: { session.cessb },
-            set: { session.setCESSB($0) }
-        ))
-        Text("Tames SSB envelope overshoot so you can run more average power for the same peak. Pairs well with the speech processor.")
+        Picker("Processing", selection: Binding(
+            get: { session.txProcessing },
+            set: { session.setTXProcessing($0) }
+        )) {
+            ForEach(TXProcessing.allCases) { profile in
+                Text(profile.rawValue).tag(profile)
+            }
+        }
+        Text("Off: clean. Normal: light compression. DX: heavier compression for talk power. DX+: adds CESSB for maximum average power.")
             .font(.caption)
             .foregroundStyle(.secondary)
     }
