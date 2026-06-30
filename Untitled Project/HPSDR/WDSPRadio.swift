@@ -116,6 +116,13 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private var filterLow: Double = 150      // SSB/DIGI low cut
     private var filterHigh: Double = 2850    // SSB/DIGI high cut / symmetric bandwidth
 
+    // Noise reduction (RXA): EMNR spectral subtraction, ANR (LMS), ANF (auto-notch).
+    private var emnrOn = false
+    private var emnrGainMethod: Int32 = 2    // 0 linear, 1 log, 2 gamma (WDSP default)
+    private var emnrArtifact = true          // artifact (musical-noise) elimination
+    private var anrOn = false
+    private var anfOn = false
+
     init(ring: AudioRingBuffer) {
         self.ring = ring
         inBuffer = [Double](repeating: 0, count: WDSPRadio.bufferSize * 2)
@@ -140,6 +147,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         resetFilterDefaults()
         isOpen = true
         applyMode()
+        applyNoiseReduction()
         _ = SetChannelState(Self.channelID, 1, 0)
     }
 
@@ -188,9 +196,43 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         if isOpen { SetRXAPanelGain1(Self.channelID, volume) }
     }
 
-    func setNoiseReduction(_ on: Bool) {
-        guard isOpen else { return }
-        SetRXAEMNRRun(Self.channelID, on ? 1 : 0)
+    /// EMNR spectral-subtraction noise reduction (on/off).
+    func setSpectralNR(_ on: Bool) {
+        emnrOn = on
+        if isOpen { SetRXAEMNRRun(Self.channelID, on ? 1 : 0) }
+    }
+
+    /// EMNR gain computation method: 0 = linear, 1 = log, 2 = gamma.
+    func setSpectralNRGainMethod(_ method: Int) {
+        emnrGainMethod = Int32(method)
+        if isOpen { SetRXAEMNRgainMethod(Self.channelID, emnrGainMethod) }
+    }
+
+    /// EMNR artifact (musical-noise) reduction post-filter.
+    func setSpectralNRArtifactReduction(_ on: Bool) {
+        emnrArtifact = on
+        if isOpen { SetRXAEMNRaeRun(Self.channelID, on ? 1 : 0) }
+    }
+
+    /// ANR: LMS (least-mean-squares) broadband noise reduction.
+    func setANR(_ on: Bool) {
+        anrOn = on
+        if isOpen { SetRXAANRRun(Self.channelID, on ? 1 : 0) }
+    }
+
+    /// ANF: automatic notch filter (removes steady carriers/heterodynes).
+    func setANF(_ on: Bool) {
+        anfOn = on
+        if isOpen { SetRXAANFRun(Self.channelID, on ? 1 : 0) }
+    }
+
+    /// Re-applies all noise-reduction state to the freshly opened channel.
+    private func applyNoiseReduction() {
+        SetRXAEMNRgainMethod(Self.channelID, emnrGainMethod)
+        SetRXAEMNRaeRun(Self.channelID, emnrArtifact ? 1 : 0)
+        SetRXAEMNRRun(Self.channelID, emnrOn ? 1 : 0)
+        SetRXAANRRun(Self.channelID, anrOn ? 1 : 0)
+        SetRXAANFRun(Self.channelID, anfOn ? 1 : 0)
     }
 
     /// Applies the current mode, passband width, and CW shift to the WDSP channel.

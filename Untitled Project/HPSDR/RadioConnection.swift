@@ -39,7 +39,6 @@ actor RadioConnection {
     private var audioOutput: AudioOutput?
     private let wdsp: WDSPRadio
     private var currentMode: RadioMode = .usb
-    private var noiseReductionOn = false
 
     // Transmit path: WDSP TXA turns mic/tone into TX I/Q that the send loop packs
     // into EP2 frames (with MOX + drive) while `transmit.transmitting` is true.
@@ -109,7 +108,6 @@ actor RadioConnection {
 
         // Open the WDSP receiver and transmitter channels with the current mode.
         wdsp.open(mode: currentMode)
-        wdsp.setNoiseReduction(noiseReductionOn)
         wdspTx.open(mode: currentMode)
 
         // Launch the combined send/receive loop on a dedicated thread.
@@ -246,11 +244,12 @@ actor RadioConnection {
         wdsp.setVolume(volume)
     }
 
-    /// Toggles WDSP spectral noise reduction.
-    func setNoiseReduction(_ on: Bool) {
-        noiseReductionOn = on
-        wdsp.setNoiseReduction(on)
-    }
+    /// Noise reduction controls (RXA DSP). Applied live; restored on reconnect by RadioSession.
+    func setSpectralNR(_ on: Bool) { wdsp.setSpectralNR(on) }
+    func setSpectralNRGainMethod(_ method: Int) { wdsp.setSpectralNRGainMethod(method) }
+    func setSpectralNRArtifactReduction(_ on: Bool) { wdsp.setSpectralNRArtifactReduction(on) }
+    func setANR(_ on: Bool) { wdsp.setANR(on) }
+    func setANF(_ on: Bool) { wdsp.setANF(on) }
 
     /// Tunes receiver `index` to `hz`. Applied on the next outgoing EP2 frame.
     func setFrequency(_ hz: UInt32, receiver index: Int = 0) {

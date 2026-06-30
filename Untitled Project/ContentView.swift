@@ -59,7 +59,12 @@ final class RadioSession {
     var sampleRate: HPSDRProtocol1.SampleRate = .rate48k
     var mode: RadioMode = .usb
     var volume: Float = 0.5
-    var noiseReduction = false
+    // Noise reduction (RXA DSP)
+    var spectralNR = false              // EMNR spectral subtraction
+    var spectralNRGainMethod = 2        // 0 linear, 1 log, 2 gamma
+    var spectralNRArtifact = true       // EMNR artifact (musical-noise) reduction
+    var lmsNR = false                   // ANR (LMS)
+    var autoNotch = false               // ANF auto-notch
     var cwPitch: Double = 600
     var filterWidth: Double = 250
     var filterLow: Double = 150
@@ -206,10 +211,34 @@ final class RadioSession {
         Task { await conn?.setVolume(newVolume) }
     }
 
-    func setNoiseReduction(_ on: Bool) {
-        noiseReduction = on
+    func setSpectralNR(_ on: Bool) {
+        spectralNR = on
         let conn = connection
-        Task { await conn?.setNoiseReduction(on) }
+        Task { await conn?.setSpectralNR(on) }
+    }
+
+    func setSpectralNRGainMethod(_ method: Int) {
+        spectralNRGainMethod = method
+        let conn = connection
+        Task { await conn?.setSpectralNRGainMethod(method) }
+    }
+
+    func setSpectralNRArtifact(_ on: Bool) {
+        spectralNRArtifact = on
+        let conn = connection
+        Task { await conn?.setSpectralNRArtifactReduction(on) }
+    }
+
+    func setLMSNR(_ on: Bool) {
+        lmsNR = on
+        let conn = connection
+        Task { await conn?.setANR(on) }
+    }
+
+    func setAutoNotch(_ on: Bool) {
+        autoNotch = on
+        let conn = connection
+        Task { await conn?.setANF(on) }
     }
 
     private var driveByte: UInt8 { UInt8(max(0, min(255, driveLevel / 100 * 255))) }
@@ -299,7 +328,7 @@ final class RadioSession {
             case "tune.down":       tuneBy(steps: -1)
             case "filter.narrower": adjustFilter(narrower: true)
             case "filter.wider":    adjustFilter(narrower: false)
-            case "nr.toggle":       setNoiseReduction(!noiseReduction)
+            case "nr.toggle":       setSpectralNR(!spectralNR)
             case "volume.up":       setVolume(min(1, volume + 0.05))
             case "volume.down":     setVolume(max(0, volume - 0.05))
             case "tx.ptt":          setPTT(!isTransmitting)
@@ -328,7 +357,11 @@ final class RadioSession {
         let conn = connection
         let m = mode
         let v = volume
-        let nr = noiseReduction
+        let snr = spectralNR
+        let snrGain = spectralNRGainMethod
+        let snrArt = spectralNRArtifact
+        let anr = lmsNR
+        let anf = autoNotch
         let pitch = cwPitch
         let width = filterWidth
         let low = filterLow
@@ -348,7 +381,11 @@ final class RadioSession {
         Task {
             await conn?.setMode(m)
             await conn?.setVolume(v)
-            await conn?.setNoiseReduction(nr)
+            await conn?.setSpectralNRGainMethod(snrGain)
+            await conn?.setSpectralNRArtifactReduction(snrArt)
+            await conn?.setSpectralNR(snr)
+            await conn?.setANR(anr)
+            await conn?.setANF(anf)
             await conn?.setCWPitch(pitch)
             await conn?.setFilterWidth(width)
             await conn?.setLowCut(low)
@@ -472,6 +509,9 @@ struct RadioDetailView: View {
                 if session.isConnected {
                     Section("Tuning") {
                         tuningControls
+                    }
+                    Section("Noise Reduction") {
+                        noiseReductionControls
                     }
                     Section("Transmit") {
                         transmitControls
@@ -666,9 +706,37 @@ struct RadioDetailView: View {
             ), in: 0...1)
             Image(systemName: "speaker.wave.3.fill")
         }
-        Toggle("Noise Reduction", isOn: Binding(
-            get: { session.noiseReduction },
-            set: { session.setNoiseReduction($0) }
+    }
+
+    /// Receiver noise-reduction controls: EMNR spectral subtraction (with mode and
+    /// artifact reduction), ANR (LMS), and ANF auto-notch.
+    @ViewBuilder
+    private var noiseReductionControls: some View {
+        Toggle("Spectral NR (NR2)", isOn: Binding(
+            get: { session.spectralNR },
+            set: { session.setSpectralNR($0) }
+        ))
+        if session.spectralNR {
+            Picker("NR2 Mode", selection: Binding(
+                get: { session.spectralNRGainMethod },
+                set: { session.setSpectralNRGainMethod($0) }
+            )) {
+                Text("Linear").tag(0)
+                Text("Log").tag(1)
+                Text("Gamma").tag(2)
+            }
+            Toggle("Reduce Artifacts", isOn: Binding(
+                get: { session.spectralNRArtifact },
+                set: { session.setSpectralNRArtifact($0) }
+            ))
+        }
+        Toggle("LMS NR (NR)", isOn: Binding(
+            get: { session.lmsNR },
+            set: { session.setLMSNR($0) }
+        ))
+        Toggle("Auto-Notch (ANF)", isOn: Binding(
+            get: { session.autoNotch },
+            set: { session.setAutoNotch($0) }
         ))
     }
 
