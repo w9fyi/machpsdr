@@ -589,6 +589,30 @@ struct ContentView: View {
     }
 }
 
+/// A momentary "push to talk" button style: fires `onPress` while the button is held
+/// and `onRelease` when let go (rather than toggling), and tints red while keyed.
+/// Using a ButtonStyle keeps it a real, accessible Button that does not steal taps
+/// from sibling controls the way a minimum-distance-0 DragGesture would.
+private struct PTTButtonStyle: ButtonStyle {
+    var active: Bool
+    let onPress: () -> Void
+    let onRelease: () -> Void
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .fontWeight(.medium)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .background(active ? Color.red : Color.secondary.opacity(0.2),
+                        in: RoundedRectangle(cornerRadius: 6))
+            .foregroundStyle(active ? .white : .primary)
+            .contentShape(Rectangle())
+            .onChange(of: configuration.isPressed) { _, pressed in
+                if pressed { onPress() } else { onRelease() }
+            }
+    }
+}
+
 /// Radio detail: connection controls, tuning, and a live status readout proving the I/Q stream.
 struct RadioDetailView: View {
     let radio: DiscoveredRadio
@@ -661,21 +685,13 @@ struct RadioDetailView: View {
     private var transmitControls: some View {
         HStack {
             // Push-to-talk: held down to transmit, released to receive.
-            Text("Transmit")
-                .fontWeight(.medium)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 6)
-                .background(session.isTransmitting ? Color.red : Color.secondary.opacity(0.2),
-                            in: RoundedRectangle(cornerRadius: 6))
-                .foregroundStyle(session.isTransmitting ? .white : .primary)
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { _ in if !session.isTransmitting { session.setPTT(true) } }
-                        .onEnded { _ in session.setPTT(false) }
-                )
+            Button("Transmit") { }
+                .buttonStyle(PTTButtonStyle(
+                    active: session.isTransmitting,
+                    onPress: { session.setPTT(true) },
+                    onRelease: { session.setPTT(false) }
+                ))
                 .accessibilityLabel("Transmit, push to talk")
-                .accessibilityAddTraits(.isButton)
             Toggle("Tune", isOn: Binding(
                 get: { session.isTuning },
                 set: { session.setTune($0) }
