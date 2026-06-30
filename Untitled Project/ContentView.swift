@@ -67,6 +67,12 @@ final class RadioSession {
     var lmsNR = false                   // ANR (LMS)
     var lmsNRStrength = 64              // ANR LMS filter taps (strength)
     var autoNotch = false               // ANF auto-notch
+    // Front-end noise blankers (impulse/static)
+    var noiseBlanker = false            // ANB
+    var noiseBlankerThreshold = 3.0     // × running-average magnitude
+    var noiseBlanker2 = false           // NOB
+    var noiseBlanker2Mode = 0           // 0 zero, 1 sample-hold, 2 mean-hold, 3 hold-sample, 4 interpolate
+    var noiseBlanker2Threshold = 3.0
     var cwPitch: Double = 600
     var filterWidth: Double = 250
     var filterLow: Double = 150
@@ -255,6 +261,36 @@ final class RadioSession {
         Task { await conn?.setANF(on) }
     }
 
+    func setNoiseBlanker(_ on: Bool) {
+        noiseBlanker = on
+        let conn = connection
+        Task { await conn?.setNoiseBlanker(on) }
+    }
+
+    func setNoiseBlankerThreshold(_ threshold: Double) {
+        noiseBlankerThreshold = threshold
+        let conn = connection
+        Task { await conn?.setNoiseBlankerThreshold(threshold) }
+    }
+
+    func setNoiseBlanker2(_ on: Bool) {
+        noiseBlanker2 = on
+        let conn = connection
+        Task { await conn?.setNoiseBlanker2(on) }
+    }
+
+    func setNoiseBlanker2Mode(_ mode: Int) {
+        noiseBlanker2Mode = mode
+        let conn = connection
+        Task { await conn?.setNoiseBlanker2Mode(mode) }
+    }
+
+    func setNoiseBlanker2Threshold(_ threshold: Double) {
+        noiseBlanker2Threshold = threshold
+        let conn = connection
+        Task { await conn?.setNoiseBlanker2Threshold(threshold) }
+    }
+
     private var driveByte: UInt8 { UInt8(max(0, min(255, driveLevel / 100 * 255))) }
 
     func setPTT(_ on: Bool) {
@@ -378,6 +414,11 @@ final class RadioSession {
         let anr = lmsNR
         let anrStrength = lmsNRStrength
         let anf = autoNotch
+        let nb = noiseBlanker
+        let nbThresh = noiseBlankerThreshold
+        let nb2 = noiseBlanker2
+        let nb2Mode = noiseBlanker2Mode
+        let nb2Thresh = noiseBlanker2Threshold
         let pitch = cwPitch
         let width = filterWidth
         let low = filterLow
@@ -404,6 +445,11 @@ final class RadioSession {
             await conn?.setANRStrength(anrStrength)
             await conn?.setANR(anr)
             await conn?.setANF(anf)
+            await conn?.setNoiseBlankerThreshold(nbThresh)
+            await conn?.setNoiseBlanker(nb)
+            await conn?.setNoiseBlanker2Mode(nb2Mode)
+            await conn?.setNoiseBlanker2Threshold(nb2Thresh)
+            await conn?.setNoiseBlanker2(nb2)
             await conn?.setCWPitch(pitch)
             await conn?.setFilterWidth(width)
             await conn?.setLowCut(low)
@@ -775,6 +821,48 @@ struct RadioDetailView: View {
             get: { session.autoNotch },
             set: { session.setAutoNotch($0) }
         ))
+        Toggle("Noise Blanker (NB)", isOn: Binding(
+            get: { session.noiseBlanker },
+            set: { session.setNoiseBlanker($0) }
+        ))
+        if session.noiseBlanker {
+            HStack {
+                Text("NB Threshold")
+                Slider(value: Binding(
+                    get: { session.noiseBlankerThreshold },
+                    set: { session.setNoiseBlankerThreshold($0) }
+                ), in: 1.5...10, step: 0.1)
+                Text(String(format: "%.1f×", session.noiseBlankerThreshold))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+        }
+        Toggle("Noise Blanker 2 (NB2)", isOn: Binding(
+            get: { session.noiseBlanker2 },
+            set: { session.setNoiseBlanker2($0) }
+        ))
+        if session.noiseBlanker2 {
+            Picker("NB2 Fill", selection: Binding(
+                get: { session.noiseBlanker2Mode },
+                set: { session.setNoiseBlanker2Mode($0) }
+            )) {
+                Text("Zero").tag(0)
+                Text("Sample-Hold").tag(1)
+                Text("Mean-Hold").tag(2)
+                Text("Hold-Sample").tag(3)
+                Text("Interpolate").tag(4)
+            }
+            HStack {
+                Text("NB2 Threshold")
+                Slider(value: Binding(
+                    get: { session.noiseBlanker2Threshold },
+                    set: { session.setNoiseBlanker2Threshold($0) }
+                ), in: 1.5...10, step: 0.1)
+                Text(String(format: "%.1f×", session.noiseBlanker2Threshold))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     @ViewBuilder

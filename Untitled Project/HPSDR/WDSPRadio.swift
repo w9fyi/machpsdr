@@ -125,6 +125,15 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private var anrTaps: Int32 = 64          // ANR LMS filter length (strength)
     private var anfOn = false
 
+    // Front-end noise blankers (EXT): ANB (NB) and NOB (NB2). Run on the complex I/Q
+    // before demodulation. `nbID` indexes WDSP's external-blanker tables.
+    private let nbID: Int32 = 0
+    private var nbOn = false
+    private var nbThreshold: Double = 3.0
+    private var nb2On = false
+    private var nb2Mode: Int32 = 0           // 0 zero, 1 sample-hold, 2 mean-hold, 3 hold-sample, 4 interpolate
+    private var nb2Threshold: Double = 3.0
+
     init(ring: AudioRingBuffer) {
         self.ring = ring
         inBuffer = [Double](repeating: 0, count: WDSPRadio.bufferSize * 2)
@@ -142,6 +151,12 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
                     Int32(Self.audioRate),
                     0, 0,
                     0.010, 0.025, 0.000, 0.010, 0)
+        // Front-end noise blankers (ANB + NOB), created with the channel. Gentle
+        // timing defaults; `threshold` (× running-average magnitude) is the main knob.
+        create_anbEXT(nbID, 0, Int32(Self.bufferSize), Double(Self.audioRate),
+                      0.0001, 0.0001, 0.0001, 0.005, nbThreshold)
+        create_nobEXT(nbID, 0, nb2Mode, Int32(Self.bufferSize), Double(Self.audioRate),
+                      0.0001, 0.0001, 0.0001, 0.005, nb2Threshold)
         SetRXAAGCMode(Self.channelID, 3)      // medium AGC
         SetRXAAGCTop(Self.channelID, 90.0)
         SetRXAPanelGain1(Self.channelID, volume)
@@ -150,6 +165,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         isOpen = true
         applyMode()
         applyNoiseReduction()
+        applyNoiseBlanker()
         _ = SetChannelState(Self.channelID, 1, 0)
     }
 
@@ -157,6 +173,8 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         guard isOpen else { return }
         _ = SetChannelState(Self.channelID, 0, 1)
         CloseChannel(Self.channelID)
+        destroy_anbEXT(nbID)
+        destroy_nobEXT(nbID)
         isOpen = false
         fill = 0
     }
@@ -240,6 +258,44 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         if isOpen { SetRXAANFRun(Self.channelID, on ? 1 : 0) }
     }
 
+    /// Noise Blanker (ANB): blanks impulse/static bursts on the front-end I/Q.
+    func setNoiseBlanker(_ on: Bool) {
+        nbOn = on
+        if isOpen { SetEXTANBRun(nbID, on ? 1 : 0) }
+    }
+
+    /// NB threshold as a multiple of the running-average magnitude (lower = more aggressive).
+    func setNoiseBlankerThreshold(_ threshold: Double) {
+        nbThreshold = threshold
+        if isOpen { SetEXTANBThreshold(nbID, threshold) }
+    }
+
+    /// Noise Blanker 2 (NOB): second-generation blanker with selectable fill mode.
+    func setNoiseBlanker2(_ on: Bool) {
+        nb2On = on
+        if isOpen { SetEXTNOBRun(nbID, on ? 1 : 0) }
+    }
+
+    /// NB2 fill mode: 0 zero, 1 sample-hold, 2 mean-hold, 3 hold-sample, 4 interpolate.
+    func setNoiseBlanker2Mode(_ mode: Int) {
+        nb2Mode = Int32(mode)
+        if isOpen { SetEXTNOBMode(nbID, nb2Mode) }
+    }
+
+    func setNoiseBlanker2Threshold(_ threshold: Double) {
+        nb2Threshold = threshold
+        if isOpen { SetEXTNOBThreshold(nbID, threshold) }
+    }
+
+    /// Re-applies blanker state after the EXT instances are (re)created on open.
+    private func applyNoiseBlanker() {
+        SetEXTANBThreshold(nbID, nbThreshold)
+        SetEXTANBRun(nbID, nbOn ? 1 : 0)
+        SetEXTNOBMode(nbID, nb2Mode)
+        SetEXTNOBThreshold(nbID, nb2Threshold)
+        SetEXTNOBRun(nbID, nb2On ? 1 : 0)
+    }
+
     /// Re-applies all noise-reduction state to the freshly opened channel.
     private func applyNoiseReduction() {
         SetRXAEMNRgainMethod(Self.channelID, emnrGainMethod)
@@ -286,6 +342,17 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
             fill += 1
 
             if fill == Self.bufferSize {
+                // Front-end impulse/static blanking on the complex I/Q (in place).
+                if nbOn {
+                    inBuffer.withUnsafeMutableBufferPointer { p in
+                        xanbEXT(nbID, p.baseAddress, p.baseAddress)
+                    }
+                }
+                if nb2On {
+                    inBuffer.withUnsafeMutableBufferPointer { p in
+                        xnobEXT(nbID, p.baseAddress, p.baseAddress)
+                    }
+                }
                 var error: Int32 = 0
                 fexchange0(Self.channelID, &inBuffer, &outBuffer, &error)
                 for k in 0..<Self.bufferSize {

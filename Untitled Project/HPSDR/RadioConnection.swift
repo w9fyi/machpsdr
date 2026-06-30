@@ -252,6 +252,11 @@ actor RadioConnection {
     func setANR(_ on: Bool) { wdsp.setANR(on) }
     func setANRStrength(_ taps: Int) { wdsp.setANRStrength(taps) }
     func setANF(_ on: Bool) { wdsp.setANF(on) }
+    func setNoiseBlanker(_ on: Bool) { wdsp.setNoiseBlanker(on) }
+    func setNoiseBlankerThreshold(_ threshold: Double) { wdsp.setNoiseBlankerThreshold(threshold) }
+    func setNoiseBlanker2(_ on: Bool) { wdsp.setNoiseBlanker2(on) }
+    func setNoiseBlanker2Mode(_ mode: Int) { wdsp.setNoiseBlanker2Mode(mode) }
+    func setNoiseBlanker2Threshold(_ threshold: Double) { wdsp.setNoiseBlanker2Threshold(threshold) }
 
     /// Tunes receiver `index` to `hz`. Applied on the next outgoing EP2 frame.
     func setFrequency(_ hz: UInt32, receiver index: Int = 0) {
