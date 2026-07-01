@@ -72,7 +72,8 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
         txLow = low
         txHigh = high
         if isOpen {
-            SetTXABandpassFreqs(Self.channelID, -txHigh, -txLow)
+            let pb = txPassband()
+            SetTXABandpassFreqs(Self.channelID, pb.low, pb.high)
             SetTXABandpassRun(Self.channelID, 1)
         }
     }
@@ -125,11 +126,21 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
 
     private func applyMode() {
         SetTXAMode(Self.channelID, mode.wdspCode)
-        // WDSP TXA only produces output with a negative-frequency passband; the
-        // mode sets the actual sideband. (Sideband polarity verified on-air.)
-        // Edges come from the user-adjustable TX passband.
-        SetTXABandpassFreqs(Self.channelID, -txHigh, -txLow)
+        let pb = txPassband()
+        SetTXABandpassFreqs(Self.channelID, pb.low, pb.high)
         SetTXABandpassRun(Self.channelID, 1)
+    }
+
+    /// Signed TX passband edges for the current sideband: USB/DIGU is a positive
+    /// passband, LSB/DIGL negative, and AM/SAM/FM symmetric — matching the RX
+    /// convention in `RadioMode.passband`. (The old code hardcoded the negative/LSB
+    /// form, which put USB audio on the wrong side of the filter and zeroed USB output.)
+    private func txPassband() -> (low: Double, high: Double) {
+        switch mode {
+        case .usb, .digu: return (txLow, txHigh)
+        case .lsb, .digl: return (-txHigh, -txLow)
+        default:          return (-txHigh, txHigh)
+        }
     }
 
     /// Processes exactly `bufferSize` mono mic samples (pad with zeros for tune)
