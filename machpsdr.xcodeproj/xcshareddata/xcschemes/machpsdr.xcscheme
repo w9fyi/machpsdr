@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "000000000000000100000000"
-               BuildableName = "Untitled Project.app"
-               BlueprintName = "MyApp"
-               ReferencedContainer = "container:Untitled Project.xcodeproj">
+               BuildableName = "machpsdr.app"
+               BlueprintName = "machpsdr"
+               ReferencedContainer = "container:machpsdr.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -46,9 +46,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "000000000000000100000000"
-            BuildableName = "Untitled Project.app"
-            BlueprintName = "MyApp"
-            ReferencedContainer = "container:Untitled Project.xcodeproj">
+            BuildableName = "machpsdr.app"
+            BlueprintName = "machpsdr"
+            ReferencedContainer = "container:machpsdr.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -63,9 +63,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "000000000000000100000000"
-            BuildableName = "Untitled Project.app"
-            BlueprintName = "MyApp"
-            ReferencedContainer = "container:Untitled Project.xcodeproj">
+            BuildableName = "machpsdr.app"
+            BlueprintName = "machpsdr"
+            ReferencedContainer = "container:machpsdr.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>
