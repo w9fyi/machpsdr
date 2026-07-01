@@ -164,10 +164,10 @@ actor RadioConnection {
     /// Keys/unkeys the transmitter. On key-down this starts mic capture and feeds it
     /// through WDSP TXA; on key-up it stops the mic.
     func setTransmit(_ on: Bool) {
-        transmit.tune = false
         if on {
-            // Start mic capture only while keyed (triggers the permission prompt on
-            // first use; avoids touching the mic during receive).
+            // Keying voice cancels any tune carrier and starts mic capture (which
+            // triggers the permission prompt on first use).
+            transmit.tune = false
             micRing.clear()
             let input = AudioInput(ring: micRing, deviceUID: micDeviceUID)
             do {
@@ -178,11 +178,13 @@ actor RadioConnection {
                 // Transmit still keys; audio stays silent until the mic comes up.
                 NSLog("AudioInput failed to start: \(error.localizedDescription)")
             }
+            transmit.transmitting = true
         } else {
             audioInput?.stop()
             audioInput = nil
+            // Un-keying PTT must not cancel an active tune carrier.
+            if !transmit.tune { transmit.transmitting = false }
         }
-        transmit.transmitting = on
     }
 
     /// Starts/stops a steady tune carrier (synthesized directly for a glitch-free tone)

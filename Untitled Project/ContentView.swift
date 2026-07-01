@@ -681,27 +681,30 @@ struct ContentView: View {
     }
 }
 
-/// A momentary "push to talk" button style: fires `onPress` while the button is held
-/// and `onRelease` when let go (rather than toggling), and tints red while keyed.
-/// Using a ButtonStyle keeps it a real, accessible Button that does not steal taps
-/// from sibling controls the way a minimum-distance-0 DragGesture would.
-private struct PTTButtonStyle: ButtonStyle {
-    var active: Bool
-    let onPress: () -> Void
-    let onRelease: () -> Void
+/// Hold-to-talk button. Press state is tracked with `@GestureState`, which the gesture
+/// system owns and resets automatically — so frequent parent re-renders (the live status
+/// stream updates ~10×/sec) can't spuriously fire a release and un-key the transmitter.
+private struct PTTButton: View {
+    let isKeyed: Bool
+    let onPressChange: (Bool) -> Void
+    @GestureState private var pressing = false
 
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
+    var body: some View {
+        Text("Transmit")
             .fontWeight(.medium)
             .padding(.horizontal, 14)
             .padding(.vertical, 6)
-            .background(active ? Color.red : Color.secondary.opacity(0.2),
+            .background(isKeyed ? Color.red : Color.secondary.opacity(0.2),
                         in: RoundedRectangle(cornerRadius: 6))
-            .foregroundStyle(active ? .white : .primary)
+            .foregroundStyle(isKeyed ? .white : .primary)
             .contentShape(Rectangle())
-            .onChange(of: configuration.isPressed) { _, pressed in
-                if pressed { onPress() } else { onRelease() }
-            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .updating($pressing) { _, state, _ in state = true }
+            )
+            .onChange(of: pressing) { _, now in onPressChange(now) }
+            .accessibilityLabel("Transmit, push to talk")
+            .accessibilityAddTraits(.isButton)
     }
 }
 
@@ -783,13 +786,7 @@ struct RadioDetailView: View {
     private var transmitControls: some View {
         HStack {
             // Push-to-talk: held down to transmit, released to receive.
-            Button("Transmit") { }
-                .buttonStyle(PTTButtonStyle(
-                    active: session.isTransmitting,
-                    onPress: { session.setPTT(true) },
-                    onRelease: { session.setPTT(false) }
-                ))
-                .accessibilityLabel("Transmit, push to talk")
+            PTTButton(isKeyed: session.isTransmitting) { session.setPTT($0) }
             Toggle("Tune", isOn: Binding(
                 get: { session.isTuning },
                 set: { session.setTune($0) }
