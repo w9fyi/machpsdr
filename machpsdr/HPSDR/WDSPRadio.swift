@@ -158,6 +158,10 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private var manualNotches: [(freq: Double, width: Double, active: Bool)] = []
     private var tuneFrequency: Double = 0
 
+    // APF: CW audio peaking filter (WDSP SPCW). Peaks a narrow band at the CW pitch.
+    private var apfOn = false
+    private var apfBandwidth: Double = 100
+
     init(ring: AudioRingBuffer, channelID: Int32 = 0, nbID: Int32 = 0) {
         self.ring = ring
         self.channelID = channelID
@@ -327,6 +331,26 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         if isOpen { RXANBPSetNotchesRun(channelID, on ? 1 : 0) }
     }
 
+    /// APF: CW audio peaking filter. Peaks a narrow band at the CW pitch to pull weak
+    /// CW signals out of the noise. (WDSP SPCW.)
+    func setAPF(_ on: Bool) {
+        apfOn = on
+        if isOpen { applyAPF() }
+    }
+
+    /// APF peak bandwidth in Hz (narrower = sharper peak).
+    func setAPFBandwidth(_ bw: Double) {
+        apfBandwidth = bw
+        if isOpen { applyAPF() }
+    }
+
+    private func applyAPF() {
+        SetRXASPCWFreq(channelID, cwPitch)          // peak at the sidetone pitch
+        SetRXASPCWBandwidth(channelID, apfBandwidth)
+        SetRXASPCWGain(channelID, 2.0)
+        SetRXASPCWRun(channelID, apfOn ? 1 : 0)
+    }
+
     /// Rebuilds WDSP's notch database from the current `manualNotches` (delete-all then
     /// re-add), re-pushes the tune frequency, and applies the master run state.
     private func applyManualNotches() {
@@ -447,6 +471,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
             SetRXAShiftRun(channelID, 0)
         }
         applySquelch()   // AMSQ vs FMSQ depends on the active mode
+        applyAPF()       // APF peaks at the current CW pitch
     }
 
     /// Feeds interleaved Float I/Q at `inputRate`; decimates to 48 kHz and runs WDSP a

@@ -20,8 +20,8 @@ Legend: ✅ implemented in machpsdr · ⬜ to do · ➖ not applicable to the AN
 - ✅ SNB spectral noise blanker (SNBA)
 - ✅ AGC modes + AGC-T; ⬜ Custom mode (slope/attack/decay/hang), on-panadapter AGC lines
 - ✅ Variable filters (width / low-high per mode); ⬜ Var1/Var2 memories, drag filter edges
-- ⬜ APF CW peaking filter (gain/tune/BW; Bi-Quad/Double-Pole/Matched/Gaussian) — NOT
-  in the vendored WDSP build (no SetRXAAPF/SPEAK symbols); needs WDSP source addition
+- ✅ APF CW peaking filter (on/off + bandwidth, peaks at CW pitch); WDSP SPCW —
+  was already compiled and chained in RXA, just needed exposing. ⬜ design/gain UI
 - ✅ MNF manual notch filters — add/remove/toggle at absolute RF, frequency-tracking,
   persisted across launches
 - ✅ Squelch — AM/SAM level squelch (AMSQ) + FM squelch (FMSQ), mode-aware, with a

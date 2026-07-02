@@ -56,6 +56,25 @@ struct NoiseReductionSectionView: View {
             set: { session.setSNB($0) }
         ))
         .accessibilityHint("Reduces broadband spectral and impulse noise.")
+        Toggle("APF (CW Peak)", isOn: Binding(
+            get: { session.apf },
+            set: { session.setAPF($0) }
+        ))
+        .accessibilityHint("Audio peaking filter for CW: peaks a narrow band at the CW pitch.")
+        if session.apf {
+            HStack {
+                Text("APF Bandwidth")
+                Slider(value: Binding(
+                    get: { session.apfBandwidth },
+                    set: { session.setAPFBandwidth($0) }
+                ), in: 30...500, step: 10)
+                .accessibilityLabel("APF bandwidth")
+                .accessibilityValue("\(Int(session.apfBandwidth)) hertz")
+                Text("\(Int(session.apfBandwidth)) Hz")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+        }
         Toggle("Noise Blanker (NB)", isOn: Binding(
             get: { session.noiseBlanker },
             set: { session.setNoiseBlanker($0) }

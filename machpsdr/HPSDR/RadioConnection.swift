@@ -425,6 +425,10 @@ actor RadioConnection {
     func setManualNotchRun(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setManualNotchRun(on) } }
     func setTuneFrequency(_ hz: Double, slice: Int = 0) { runOnSlice(slice) { $0.setTuneFrequency(hz) } }
 
+    /// APF CW audio peaking filter, per slice.
+    func setAPF(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setAPF(on) } }
+    func setAPFBandwidth(_ bw: Double, slice: Int = 0) { runOnSlice(slice) { $0.setAPFBandwidth(bw) } }
+
     /// Tunes receiver `index` to `hz`. Applied on the next outgoing EP2 frame.
     func setFrequency(_ hz: UInt32, receiver index: Int = 0) {
         var s = settingsBox.current

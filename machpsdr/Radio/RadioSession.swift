@@ -45,6 +45,8 @@ final class RadioSession {
     var squelch = false
     var squelchLevel = 50.0             // 0…100 UI scale
     var snb = false                     // SNB spectral noise blanker
+    var apf = false                     // APF CW audio peaking filter
+    var apfBandwidth = 100.0            // APF peak bandwidth, Hz
     // MNF manual notches (persisted). `manualNotchOn` is the master enable.
     var manualNotchOn = false
     var manualNotches: [ManualNotch] = []
@@ -355,6 +357,18 @@ final class RadioSession {
         snb = on
         let conn = connection
         Task { await conn?.setSNB(on) }
+    }
+
+    func setAPF(_ on: Bool) {
+        apf = on
+        let conn = connection
+        Task { await conn?.setAPF(on) }
+    }
+
+    func setAPFBandwidth(_ bw: Double) {
+        apfBandwidth = bw
+        let conn = connection
+        Task { await conn?.setAPFBandwidth(bw) }
     }
 
     // MARK: - Manual notch filters (MNF)
@@ -702,6 +716,8 @@ final class RadioSession {
         let sql = squelch
         let sqlLevel = squelchLevel
         let snbOn = snb
+        let apfOn = apf
+        let apfBW = apfBandwidth
         let notches = manualNotches.map { (freq: $0.frequencyHz, width: $0.widthHz, active: $0.active) }
         let notchRun = manualNotchOn
         let notchTuneFreq = Double(frequencyHz)
@@ -753,6 +769,8 @@ final class RadioSession {
             await conn?.setSquelchLevel(sqlLevel)
             await conn?.setSquelch(sql)
             await conn?.setSNB(snbOn)
+            await conn?.setAPFBandwidth(apfBW)
+            await conn?.setAPF(apfOn)
             await conn?.setTuneFrequency(notchTuneFreq)
             await conn?.setManualNotches(notches)
             await conn?.setManualNotchRun(notchRun)

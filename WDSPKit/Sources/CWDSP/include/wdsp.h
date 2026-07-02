@@ -89,6 +89,10 @@ extern void RXANBPGetNumNotches (int channel, int* nnotches);
 extern void RXANBPSetNotchesRun (int channel, int run);
 extern void RXANBPSetTuneFrequency (int channel, double tunefreq);
 extern void SetRXASNBAOutputBandwidth (int channel, double low, double high);
+extern void SetRXASPCWRun (int channel, int run);
+extern void SetRXASPCWFreq (int channel, double freq);
+extern void SetRXASPCWBandwidth (int channel, double bw);
+extern void SetRXASPCWGain (int channel, double gain);
 
 extern void SetRXAANRRun(int channel, int run);
 extern void SetRXAEMNRaeRun (int channel, int run);
