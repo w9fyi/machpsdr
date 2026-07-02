@@ -17,12 +17,13 @@ Legend: ✅ implemented in machpsdr · ⬜ to do · ➖ not applicable to the AN
 - ✅ ANF auto-notch
 - ✅ NB (ANB) with threshold
 - ✅ NB2 (NOB) with 5 fill modes + threshold
-- ⬜ SNB spectral noise blanker `[WDSP: snba/bpsnba]`
+- ✅ SNB spectral noise blanker (SNBA)
 - ✅ AGC modes + AGC-T; ⬜ Custom mode (slope/attack/decay/hang), on-panadapter AGC lines
 - ✅ Variable filters (width / low-high per mode); ⬜ Var1/Var2 memories, drag filter edges
 - ⬜ APF CW peaking filter (gain/tune/BW; Bi-Quad/Double-Pole/Matched/Gaussian) — NOT
   in the vendored WDSP build (no SetRXAAPF/SPEAK symbols); needs WDSP source addition
-- ⬜ MNF manual notch filters (persistent, frequency-tracking) `[WDSP: RXANBPAddNotch/…]`
+- ✅ MNF manual notch filters — add/remove/toggle at absolute RF, frequency-tracking,
+  persisted across launches
 - ✅ Squelch — AM/SAM level squelch (AMSQ) + FM squelch (FMSQ), mode-aware, with a
   0–100 level; ⬜ SSB voice squelch (SSQL is not in the vendored WDSP build)
 - ✅ RX EQ (3-band); ⬜ parametric 5/10/18-band with Q
@@ -37,7 +38,8 @@ CFC (+post-EQ) → bandpass → COMP → aux bandpass → CESSB.
 
 - ✅ COMP compressor (via presets); ⬜ direct gain control UI
 - ✅ CESSB (DX+ preset)
-- ⬜ CFC continuous frequency compressor (multi-band, per-band gains) `[WDSP: cfcomp]`
+- ✅ CFC continuous frequency compressor (on/off, pre-comp, post-EQ; uses WDSP's
+  default band profile); ⬜ per-band gain editing UI
 - ✅ TX EQ (3-band); ⬜ parametric bands, pre/post-CFC position
 - ⬜ DEXP downward expander / noise gate `[WDSP: dexp]`
 - ⬜ VOX (threshold/delay driving PTT)
@@ -45,8 +47,8 @@ CFC (+post-EQ) → bandpass → COMP → aux bandpass → CESSB.
 - ✅ TX filter low/high (sideband-aware)
 - ⬜ TX monitor (MON — hear own processed audio)
 - ⬜ Transmit profiles (named, per-mode auto-switch, import/export)
-- ⬜ Leveler `[WDSP]`
-- ⬜ Phase rotator `[WDSP]`
+- ✅ Leveler (on/off + max-gain ceiling) `[WDSP]`
+- ✅ Phase rotator (on/off) `[WDSP]`
 - ⬜ Voice keyer / wave playback + macros
 - ⬜ PureSignal — 10E: works on many (not all) bands via internal TX→RX crosstalk, no
   coupler; clean path is an external coupler (e.g. TAPR TR-Plus). Under Protocol 1 the

@@ -21,6 +21,14 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
     private var eqGains: [Int32] = [0, 0, 0, 0]   // [preamp, low, mid, high] in dB
     private var cessbOn = false                    // CESSB overshoot control (W9GR)
 
+    // Additional TX processing (WDSP TXA chain).
+    private var phaseRotatorOn = false             // PHROT: voice-asymmetry rotator
+    private var levelerOn = false                  // slow gain leveler ahead of COMP
+    private var levelerTop: Double = 15            // leveler ceiling (max gain), dB
+    private var cfcOn = false                      // CFC multi-band compressor
+    private var cfcPrecomp: Double = 0             // CFC pre-compression, dB
+    private var cfcEqOn = false                    // CFC post-equalizer
+
     private var inBuffer: [Double]      // interleaved (mic, 0)
     private var outBuffer: [Double]     // interleaved TX I/Q
     private var iqScratch: [Float]
@@ -48,6 +56,7 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
         SetTXACompressorRun(Self.channelID, 0)   // speech processor off by default
         applyEQ()
         SetTXAosctrlRun(Self.channelID, cessbOn ? 1 : 0)
+        applyExtraProcessing()
         _ = SetChannelState(Self.channelID, 1, 0)
         isOpen = true
     }
@@ -101,6 +110,55 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
     func setCESSB(_ on: Bool) {
         cessbOn = on
         if isOpen { SetTXAosctrlRun(Self.channelID, on ? 1 : 0) }
+    }
+
+    /// Phase rotator (PHROT): reshapes voice waveform asymmetry for higher average power.
+    func setPhaseRotator(_ on: Bool) {
+        phaseRotatorOn = on
+        if isOpen { SetTXAPHROTRun(Self.channelID, on ? 1 : 0) }
+    }
+
+    /// Leveler: slow AGC-like gain leveling ahead of the compressor.
+    func setLeveler(_ on: Bool) {
+        levelerOn = on
+        if isOpen { SetTXALevelerSt(Self.channelID, on ? 1 : 0) }
+    }
+
+    /// Leveler ceiling: the maximum gain (dB) the leveler will apply.
+    func setLevelerTop(_ db: Double) {
+        levelerTop = db
+        if isOpen { SetTXALevelerTop(Self.channelID, db) }
+    }
+
+    /// CFC: continuous frequency compressor (multi-band). Uses WDSP's default band
+    /// profile; per-band gain editing is a later enhancement.
+    func setCFC(_ on: Bool) {
+        cfcOn = on
+        if isOpen { SetTXACFCOMPRun(Self.channelID, on ? 1 : 0) }
+    }
+
+    /// CFC pre-compression gain (dB) applied before the multi-band stage.
+    func setCFCPrecomp(_ db: Double) {
+        cfcPrecomp = db
+        if isOpen { SetTXACFCOMPPrecomp(Self.channelID, db) }
+    }
+
+    /// CFC post-equalizer on/off.
+    func setCFCEQ(_ on: Bool) {
+        cfcEqOn = on
+        if isOpen { SetTXACFCOMPPeqRun(Self.channelID, on ? 1 : 0) }
+    }
+
+    /// Applies phase-rotator, leveler, and CFC state to the freshly opened channel.
+    private func applyExtraProcessing() {
+        SetTXAPHROTCorner(Self.channelID, 200)
+        SetTXAPHROTNstages(Self.channelID, 8)
+        SetTXAPHROTRun(Self.channelID, phaseRotatorOn ? 1 : 0)
+        SetTXALevelerTop(Self.channelID, levelerTop)
+        SetTXALevelerSt(Self.channelID, levelerOn ? 1 : 0)
+        SetTXACFCOMPPrecomp(Self.channelID, cfcPrecomp)
+        SetTXACFCOMPPeqRun(Self.channelID, cfcEqOn ? 1 : 0)
+        SetTXACFCOMPRun(Self.channelID, cfcOn ? 1 : 0)
     }
 
     /// Enables/disables the WDSP speech processor (compressor) with a gain in dB.

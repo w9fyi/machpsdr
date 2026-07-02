@@ -1,5 +1,14 @@
 import SwiftUI
 
+/// A manual notch filter entry: an absolute RF center frequency and width. Persisted
+/// across launches; WDSP tracks each notch's audio-passband position as the VFO moves.
+struct ManualNotch: Identifiable, Codable, Sendable, Equatable {
+    var id: Int
+    var frequencyHz: Double
+    var widthHz: Double
+    var active: Bool
+}
+
 /// Owns the live connection to a single radio and surfaces its state to the UI.
 @MainActor
 @Observable
@@ -35,6 +44,18 @@ final class RadioSession {
     // Squelch (AM/SAM via AMSQ, FM via FMSQ; SSB/CW have no squelch in this WDSP build)
     var squelch = false
     var squelchLevel = 50.0             // 0…100 UI scale
+    var snb = false                     // SNB spectral noise blanker
+    // MNF manual notches (persisted). `manualNotchOn` is the master enable.
+    var manualNotchOn = false
+    var manualNotches: [ManualNotch] = []
+    private var nextNotchID = 0
+    // TX processing (WDSP TXA chain)
+    var phaseRotator = false            // PHROT
+    var leveler = false                 // slow gain leveler
+    var levelerTop = 15.0               // leveler ceiling, dB
+    var cfc = false                     // CFC multi-band compressor
+    var cfcPrecomp = 0.0                // CFC pre-compression, dB
+    var cfcEQ = false                   // CFC post-equalizer
     // AGC + front-end gain
     var agcMode = 3                     // 0 off, 1 long, 2 slow, 3 medium, 4 fast
     var agcThreshold = 90.0             // AGC-T (max gain, dB)
@@ -101,6 +122,11 @@ final class RadioSession {
         if let procRaw = defaults.string(forKey: "txProcessing"),
            let proc = TXProcessing(rawValue: procRaw) {
             txProcessing = proc
+        }
+        if let data = defaults.data(forKey: "manualNotches"),
+           let saved = try? JSONDecoder().decode([ManualNotch].self, from: data) {
+            manualNotches = saved
+            nextNotchID = (saved.map(\.id).max() ?? -1) + 1
         }
         midi.onTuneStep = { [weak self] steps in
             guard let self, self.midiTuningEnabled else { return }
@@ -323,6 +349,94 @@ final class RadioSession {
         squelchLevel = level
         let conn = connection
         Task { await conn?.setSquelchLevel(level) }
+    }
+
+    func setSNB(_ on: Bool) {
+        snb = on
+        let conn = connection
+        Task { await conn?.setSNB(on) }
+    }
+
+    // MARK: - Manual notch filters (MNF)
+
+    /// Maps the notch list to Sendable tuples and pushes it to the connection.
+    private func pushManualNotches() {
+        let conn = connection
+        let notches = manualNotches.map { (freq: $0.frequencyHz, width: $0.widthHz, active: $0.active) }
+        Task { await conn?.setManualNotches(notches) }
+    }
+
+    private func persistManualNotches() {
+        if let data = try? JSONEncoder().encode(manualNotches) {
+            UserDefaults.standard.set(data, forKey: "manualNotches")
+        }
+    }
+
+    /// Adds a notch at the current VFO frequency (200 Hz wide) and enables MNF.
+    func addManualNotchAtCurrentFrequency() {
+        let notch = ManualNotch(id: nextNotchID, frequencyHz: Double(frequencyHz), widthHz: 200, active: true)
+        nextNotchID += 1
+        manualNotches.append(notch)
+        if !manualNotchOn { setManualNotchRun(true) }
+        persistManualNotches()
+        pushManualNotches()
+    }
+
+    func removeManualNotch(id: Int) {
+        manualNotches.removeAll { $0.id == id }
+        persistManualNotches()
+        pushManualNotches()
+    }
+
+    func setManualNotchActive(id: Int, active: Bool) {
+        guard let k = manualNotches.firstIndex(where: { $0.id == id }) else { return }
+        manualNotches[k].active = active
+        persistManualNotches()
+        pushManualNotches()
+    }
+
+    func setManualNotchRun(_ on: Bool) {
+        manualNotchOn = on
+        let conn = connection
+        Task { await conn?.setManualNotchRun(on) }
+    }
+
+    // MARK: - TX processing
+
+    func setPhaseRotator(_ on: Bool) {
+        phaseRotator = on
+        let conn = connection
+        Task { await conn?.setPhaseRotator(on) }
+    }
+
+    func setLeveler(_ on: Bool) {
+        leveler = on
+        let conn = connection
+        Task { await conn?.setLeveler(on) }
+    }
+
+    func setLevelerTop(_ db: Double) {
+        levelerTop = db
+        let conn = connection
+        Task { await conn?.setLevelerTop(db) }
+    }
+
+    func setCFC(_ on: Bool) {
+        cfc = on
+        let conn = connection
+        Task { await conn?.setCFC(on) }
+    }
+
+    func setCFCPrecomp(_ db: Double) {
+        cfcPrecomp = db
+        let conn = connection
+        Task { await conn?.setCFCPrecomp(db) }
+    }
+
+    func setCFCEQ(_ on: Bool) {
+        cfcEQ = on
+        let conn = connection
+        Task { await conn?.setCFCEQ(on) }
     }
 
     func setAGCMode(_ mode: Int) {
@@ -587,6 +701,16 @@ final class RadioSession {
         let nb2Thresh = noiseBlanker2Threshold
         let sql = squelch
         let sqlLevel = squelchLevel
+        let snbOn = snb
+        let notches = manualNotches.map { (freq: $0.frequencyHz, width: $0.widthHz, active: $0.active) }
+        let notchRun = manualNotchOn
+        let notchTuneFreq = Double(frequencyHz)
+        let phrot = phaseRotator
+        let lev = leveler
+        let levTop = levelerTop
+        let cfcOn = cfc
+        let cfcPre = cfcPrecomp
+        let cfcEqOn = cfcEQ
         let agc = agcMode
         let agcT = agcThreshold
         let atten = rxAttenuator
@@ -628,6 +752,16 @@ final class RadioSession {
             await conn?.setNoiseBlanker2(nb2)
             await conn?.setSquelchLevel(sqlLevel)
             await conn?.setSquelch(sql)
+            await conn?.setSNB(snbOn)
+            await conn?.setTuneFrequency(notchTuneFreq)
+            await conn?.setManualNotches(notches)
+            await conn?.setManualNotchRun(notchRun)
+            await conn?.setPhaseRotator(phrot)
+            await conn?.setLevelerTop(levTop)
+            await conn?.setLeveler(lev)
+            await conn?.setCFCPrecomp(cfcPre)
+            await conn?.setCFCEQ(cfcEqOn)
+            await conn?.setCFC(cfcOn)
             await conn?.setAGCMode(agc)
             await conn?.setAGCTop(agcT)
             await conn?.setRXAttenuator(UInt8(atten))

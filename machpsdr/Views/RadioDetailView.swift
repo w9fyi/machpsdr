@@ -45,6 +45,9 @@ struct RadioDetailView: View {
                     Section("Squelch") {
                         SquelchSectionView(session: session)
                     }
+                    Section("Manual Notch") {
+                        MNFSectionView(session: session)
+                    }
                     Section("RX Equalizer") {
                         RXEqualizerSectionView(session: session)
                     }
@@ -53,6 +56,9 @@ struct RadioDetailView: View {
                     }
                     Section("TX Audio") {
                         TXAudioSectionView(session: session)
+                    }
+                    Section("TX Processing") {
+                        TXProcessingSectionView(session: session)
                     }
                     Section("Live Stream") {
                         LiveStatusSectionView(session: session)

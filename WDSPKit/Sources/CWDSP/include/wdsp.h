@@ -83,6 +83,11 @@ extern double GetRXAMeter (int channel, int mt);
 extern void SetRXAPanelBinaural(int channel, int bin);
 extern void SetRXAPanelPan (int channel, double pan);
 extern void RXANBPSetFreqs (int channel, double low, double high);
+extern int RXANBPAddNotch (int channel, int notch, double fcenter, double fwidth, int active);
+extern int RXANBPDeleteNotch (int channel, int notch);
+extern void RXANBPGetNumNotches (int channel, int* nnotches);
+extern void RXANBPSetNotchesRun (int channel, int run);
+extern void RXANBPSetTuneFrequency (int channel, double tunefreq);
 extern void SetRXASNBAOutputBandwidth (int channel, double low, double high);
 
 extern void SetRXAANRRun(int channel, int run);
@@ -202,6 +207,16 @@ extern void SetTXALevelerAttack (int channel, int attack);
 extern void SetTXALevelerDecay (int channel, int decay);
 extern void SetTXALevelerHang (int channel, int hang);
 extern void SetTXALevelerTop (int channel, double maxgain);
+
+extern void SetTXAPHROTRun (int channel, int run);
+extern void SetTXAPHROTCorner (int channel, double corner);
+extern void SetTXAPHROTNstages (int channel, int nstages);
+
+extern void SetTXACFCOMPRun (int channel, int run);
+extern void SetTXACFCOMPPrecomp (int channel, double precomp);
+extern void SetTXACFCOMPPeqRun (int channel, int run);
+extern void SetTXACFCOMPPosition (int channel, int pos);
+extern void SetTXACFCOMPprofile (int channel, int nfreqs, double* F, double* G, double* E);
 
 extern void SetTXAPreGenRun (int channel, int run);
 extern void SetTXAPreGenMode (int channel, int mode);

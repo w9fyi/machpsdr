@@ -323,6 +323,14 @@ actor RadioConnection {
     /// CESSB (Controlled Envelope SSB) overshoot control.
     func setCESSB(_ on: Bool) { let tx = wdspTx; dsp { tx.setCESSB(on) } }
 
+    /// Additional TX processing: phase rotator, leveler, and CFC multi-band compressor.
+    func setPhaseRotator(_ on: Bool) { let tx = wdspTx; dsp { tx.setPhaseRotator(on) } }
+    func setLeveler(_ on: Bool) { let tx = wdspTx; dsp { tx.setLeveler(on) } }
+    func setLevelerTop(_ db: Double) { let tx = wdspTx; dsp { tx.setLevelerTop(db) } }
+    func setCFC(_ on: Bool) { let tx = wdspTx; dsp { tx.setCFC(on) } }
+    func setCFCPrecomp(_ db: Double) { let tx = wdspTx; dsp { tx.setCFCPrecomp(db) } }
+    func setCFCEQ(_ on: Bool) { let tx = wdspTx; dsp { tx.setCFCEQ(on) } }
+
     /// RX 3-band graphic EQ.
     func setRXEQ(on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setEQ(on: on) } }
     func setRXEQGains(preamp: Int, low: Int, mid: Int, high: Int, slice: Int = 0) {
@@ -407,6 +415,16 @@ actor RadioConnection {
     func setSquelch(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setSquelch(on) } }
     func setSquelchLevel(_ level: Double, slice: Int = 0) { runOnSlice(slice) { $0.setSquelchLevel(level) } }
 
+    /// SNB spectral noise blanker, per slice.
+    func setSNB(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setSNB(on) } }
+
+    /// Manual notch filters (MNF), per slice. Notches carry absolute RF center + width.
+    func setManualNotches(_ notches: [(freq: Double, width: Double, active: Bool)], slice: Int = 0) {
+        runOnSlice(slice) { $0.setManualNotches(notches) }
+    }
+    func setManualNotchRun(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setManualNotchRun(on) } }
+    func setTuneFrequency(_ hz: Double, slice: Int = 0) { runOnSlice(slice) { $0.setTuneFrequency(hz) } }
+
     /// Tunes receiver `index` to `hz`. Applied on the next outgoing EP2 frame.
     func setFrequency(_ hz: UInt32, receiver index: Int = 0) {
         var s = settingsBox.current
@@ -415,6 +433,9 @@ actor RadioConnection {
         if index == 0 { s.transmitFrequency = hz }
         settingsBox.current = s
         if engines.indices.contains(index) { engines[index].ring.clear() }
+        // Keep the slice's manual-notch database anchored to the new VFO frequency
+        // so notches track their absolute RF targets as you tune.
+        runOnSlice(index) { $0.setTuneFrequency(Double(hz)) }
     }
 
     /// Changes the number of active receive slices (1…maxSlices, clamped to what the

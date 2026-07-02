@@ -51,6 +51,11 @@ struct NoiseReductionSectionView: View {
             get: { session.autoNotch },
             set: { session.setAutoNotch($0) }
         ))
+        Toggle("Spectral NB (SNB)", isOn: Binding(
+            get: { session.snb },
+            set: { session.setSNB($0) }
+        ))
+        .accessibilityHint("Reduces broadband spectral and impulse noise.")
         Toggle("Noise Blanker (NB)", isOn: Binding(
             get: { session.noiseBlanker },
             set: { session.setNoiseBlanker($0) }

@@ -148,6 +148,16 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private var squelchOn = false
     private var squelchLevel: Double = 50    // 0…100 UI scale
 
+    // SNB: spectral noise blanker (removes broadband spectral/impulse noise).
+    private var snbOn = false
+
+    // MNF: manual notch filters. Notches are stored at absolute RF frequencies; WDSP's
+    // notch database places them in the audio passband relative to the current tune
+    // frequency (so a notch tracks its RF target as the VFO moves).
+    private var manualNotchOn = false
+    private var manualNotches: [(freq: Double, width: Double, active: Bool)] = []
+    private var tuneFrequency: Double = 0
+
     init(ring: AudioRingBuffer, channelID: Int32 = 0, nbID: Int32 = 0) {
         self.ring = ring
         self.channelID = channelID
@@ -182,6 +192,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         applyNoiseReduction()
         applyNoiseBlanker()
         applyEQ()
+        applyManualNotches()
         _ = SetChannelState(channelID, 1, 0)
     }
 
@@ -291,6 +302,47 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         if isOpen { SetRXAANFRun(channelID, on ? 1 : 0) }
     }
 
+    /// SNB: spectral noise blanker (broadband spectral/impulse noise removal).
+    func setSNB(_ on: Bool) {
+        snbOn = on
+        if isOpen { SetRXASNBARun(channelID, on ? 1 : 0) }
+    }
+
+    /// Sets the current absolute tune (VFO) frequency so the manual-notch database can
+    /// place each notch correctly in the audio passband as the VFO moves.
+    func setTuneFrequency(_ hz: Double) {
+        tuneFrequency = hz
+        if isOpen { RXANBPSetTuneFrequency(channelID, hz) }
+    }
+
+    /// Replaces the manual notch set (absolute RF center + width + active flag each).
+    func setManualNotches(_ notches: [(freq: Double, width: Double, active: Bool)]) {
+        manualNotches = notches
+        if isOpen { applyManualNotches() }
+    }
+
+    /// Master enable for the manual notch database.
+    func setManualNotchRun(_ on: Bool) {
+        manualNotchOn = on
+        if isOpen { RXANBPSetNotchesRun(channelID, on ? 1 : 0) }
+    }
+
+    /// Rebuilds WDSP's notch database from the current `manualNotches` (delete-all then
+    /// re-add), re-pushes the tune frequency, and applies the master run state.
+    private func applyManualNotches() {
+        var count: Int32 = 0
+        RXANBPGetNumNotches(channelID, &count)
+        while count > 0 {
+            _ = RXANBPDeleteNotch(channelID, 0)   // deleting index 0 shifts the rest down
+            count -= 1
+        }
+        for (i, n) in manualNotches.enumerated() {
+            _ = RXANBPAddNotch(channelID, Int32(i), n.freq, n.width, n.active ? 1 : 0)
+        }
+        RXANBPSetTuneFrequency(channelID, tuneFrequency)
+        RXANBPSetNotchesRun(channelID, manualNotchOn ? 1 : 0)
+    }
+
     /// Noise Blanker (ANB): blanks impulse/static bursts on the front-end I/Q.
     func setNoiseBlanker(_ on: Bool) {
         nbOn = on
@@ -308,7 +360,6 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         nb2On = on
         if isOpen { SetEXTNOBRun(nbID, on ? 1 : 0) }
     }
-
     /// NB2 fill mode: 0 zero, 1 sample-hold, 2 mean-hold, 3 hold-sample, 4 interpolate.
     func setNoiseBlanker2Mode(_ mode: Int) {
         nb2Mode = Int32(mode)
@@ -370,6 +421,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         SetEXTNOBMode(nbID, nb2Mode)
         SetEXTNOBThreshold(nbID, nb2Threshold)
         SetEXTNOBRun(nbID, nb2On ? 1 : 0)
+        SetRXASNBARun(channelID, snbOn ? 1 : 0)
     }
 
     /// Re-applies all noise-reduction state to the freshly opened channel.
