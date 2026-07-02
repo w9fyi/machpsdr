@@ -162,6 +162,21 @@ nonisolated enum HPSDRFrame {
                          slot2: Int,
                          txIQ: [Float]? = nil) -> [UInt8] {
         var frame = [UInt8](repeating: 0, count: HPSDRProtocol1.frameSize)
+        buildEP2(into: &frame, sequence: sequence, settings: settings,
+                 slot1: slot1, slot2: slot2, txIQ: txIQ)
+        return frame
+    }
+
+    /// In-place variant: rewrites `frame` (which must be `frameSize` bytes). The send
+    /// loop reuses one frame buffer so no allocation happens per outgoing packet.
+    static func buildEP2(into frame: inout [UInt8],
+                         sequence: UInt32,
+                         settings: RadioSettings,
+                         slot1: Int,
+                         slot2: Int,
+                         txIQ: [Float]? = nil) {
+        precondition(frame.count == HPSDRProtocol1.frameSize)
+        frame.withUnsafeMutableBytes { _ = memset($0.baseAddress, 0, $0.count) }
         frame[0] = HPSDRProtocol1.metisMagic0
         frame[1] = HPSDRProtocol1.metisMagic1
         frame[2] = HPSDRProtocol1.packetTypeData
@@ -175,7 +190,6 @@ nonisolated enum HPSDRFrame {
                       txIQ: txIQ, sampleStart: 0)
         writeUSBFrame(into: &frame, at: 520, command: settings.commandBytes(slot: slot2),
                       txIQ: txIQ, sampleStart: 63)
-        return frame
     }
 
     /// Each TX sample is 8 bytes: L(2) R(2) I(2) Q(2), 16-bit signed big-endian.
@@ -228,8 +242,115 @@ nonisolated enum HPSDRFrame {
 
     /// Parses a received EP6 packet. Returns nil if the header/sync is invalid.
     /// Decodes all `receiverCount` receivers from each interleaved sample group.
-    static func parseEP6(_ data: [UInt8], receiverCount: Int) -> EP6Result? {
-        guard data.count >= HPSDRProtocol1.frameSize,
+    /// `length` bounds how much of `data` is valid (a reused receive buffer is
+    /// usually larger than the datagram); nil means all of it.
+    static func parseEP6(_ data: [UInt8], length: Int? = nil, receiverCount: Int) -> EP6Result? {
+        let count = min(length ?? data.count, data.count)
+        guard count >= HPSDRProtocol1.frameSize else { return nil }
+        return data.withUnsafeBufferPointer { buf -> EP6Result? in
+            guard let d = buf.baseAddress,
+                  d[0] == HPSDRProtocol1.metisMagic0,
+                  d[1] == HPSDRProtocol1.metisMagic1,
+                  d[3] == HPSDRProtocol1.endpointFromRadio else {
+                return nil
+            }
+            let sequence = (UInt32(d[4]) << 24) | (UInt32(d[5]) << 16)
+                | (UInt32(d[6]) << 8) | UInt32(d[7])
+
+            var status = RadioStreamStatus()
+            let rxCount = max(receiverCount, 1)
+            // Each I/Q sample group is (3 bytes I + 3 bytes Q) per receiver, then 2 bytes mic.
+            let bytesPerGroup = 6 * rxCount + 2
+            let sampleAreaSize = HPSDRProtocol1.usbFrameSize - HPSDRProtocol1.usbHeaderSize
+            let groupCount = sampleAreaSize / bytesPerGroup
+            var receivers = [[Float]](repeating: [], count: rxCount)
+            for rx in 0..<rxCount { receivers[rx].reserveCapacity(groupCount * 4) }
+            let scale: Float = 1.0 / 8_388_608.0 // 2^23
+
+            for usbOffset in [8, 520] {
+                guard d[usbOffset] == HPSDRProtocol1.sync,
+                      d[usbOffset + 1] == HPSDRProtocol1.sync,
+                      d[usbOffset + 2] == HPSDRProtocol1.sync else {
+                    continue
+                }
+                let c0 = d[usbOffset + 3]
+                status.ptt = c0 & 0x01 != 0
+                status.dash = c0 & 0x02 != 0
+                status.dot = c0 & 0x04 != 0
+                let statusBlock = (c0 >> 3) & 0x1F
+                if statusBlock == 0 {
+                    status.adcOverflow = d[usbOffset + 4] & 0x01 != 0
+                    status.versionC2 = d[usbOffset + 5]
+                    status.versionC3 = d[usbOffset + 6]
+                    status.versionC4 = d[usbOffset + 7]
+                }
+
+                // Decode every receiver's I/Q from each interleaved group. Within a group,
+                // receiver rx occupies bytes [rx*6 ..< rx*6+6] (I: 3, Q: 3); mic trails.
+                let sampleBase = usbOffset + HPSDRProtocol1.usbHeaderSize
+                for group in 0..<groupCount {
+                    let groupBase = sampleBase + group * bytesPerGroup
+                    for rx in 0..<rxCount {
+                        let p = groupBase + rx * 6
+                        let i = HPSDRProtocol1.sample24(d[p], d[p + 1], d[p + 2])
+                        let q = HPSDRProtocol1.sample24(d[p + 3], d[p + 4], d[p + 5])
+                        // Raw I/Q (no conjugation here) so the panadapter shows the correct
+                        // orientation. WDSP gets a conjugated copy in WDSPRadio.
+                        receivers[rx].append(Float(i) * scale)
+                        receivers[rx].append(Float(q) * scale)
+                    }
+                }
+            }
+            return EP6Result(sequence: sequence, status: status, receivers: receivers)
+        }
+    }
+}
+
+/// Reassembles the EP6 sample stream across datagram boundaries.
+///
+/// `HPSDRFrame.parseEP6` assumes the two 512-byte USB frames sit at offsets 8 and
+/// 520 of every datagram. The ANAN-10E violates that after any STOP/START: its
+/// FIFO restarts packetizing mid-frame, so the frames land at a constant but
+/// arbitrary shift (observed live: sync at 322/834, then 200/712 after slice-count
+/// rebuilds) and fixed-offset parsing decodes nothing — permanent silence. The
+/// frames themselves stay intact and contiguous (offsets always 512 apart), so the
+/// robust decode is: strip each datagram's 8-byte Metis header, append the payload
+/// to a persistent byte stream, and decode every complete 512-byte USB frame
+/// wherever the 7F 7F 7F sync word lands, hunting for sync again after any junk.
+///
+/// Single-threaded (the radio I/O thread); `reset()` on socket swaps.
+nonisolated final class EP6Assembler {
+    /// Decoded output for one fed datagram (zero, one, or many USB frames may
+    /// complete). `receivers` layout matches `HPSDRFrame.EP6Result`.
+    struct Output {
+        var sequence: UInt32
+        /// True when the Metis sequence number skipped — bytes were lost, so the
+        /// pending partial frame was discarded and the decoder re-locks on sync.
+        var gap = false
+        var status = RadioStreamStatus()
+        var receivers: [[Float]]
+        var samples: [Float] { receivers.first ?? [] }
+    }
+
+    private var buffer: [UInt8]
+    private var fill = 0
+    private var expectedSequence: UInt32?
+    /// Cumulative count of sync-hunt events (stream came up shifted or lost bytes).
+    private(set) var resyncs = 0
+
+    init() {
+        // Steady state holds < one frame of remainder plus one datagram's payload.
+        buffer = [UInt8](repeating: 0, count: 4096)
+    }
+
+    func reset() {
+        fill = 0
+        expectedSequence = nil
+    }
+
+    /// Feeds one received datagram. Returns nil if it is not an EP6 data packet.
+    func feed(_ data: [UInt8], length: Int, receiverCount: Int) -> Output? {
+        guard length > 8, length <= data.count,
               data[0] == HPSDRProtocol1.metisMagic0,
               data[1] == HPSDRProtocol1.metisMagic1,
               data[3] == HPSDRProtocol1.endpointFromRadio else {
@@ -238,50 +359,104 @@ nonisolated enum HPSDRFrame {
         let sequence = (UInt32(data[4]) << 24) | (UInt32(data[5]) << 16)
             | (UInt32(data[6]) << 8) | UInt32(data[7])
 
-        var status = RadioStreamStatus()
         let rxCount = max(receiverCount, 1)
-        var receivers = [[Float]](repeating: [], count: rxCount)
-        for rx in 0..<rxCount { receivers[rx].reserveCapacity(256) }
-        // Each I/Q sample group is (3 bytes I + 3 bytes Q) per receiver, then 2 bytes mic.
-        let bytesPerGroup = 6 * rxCount + 2
-        let scale: Float = 1.0 / 8_388_608.0 // 2^23
+        var out = Output(sequence: sequence,
+                         receivers: [[Float]](repeating: [], count: rxCount))
+        if let expected = expectedSequence, sequence != expected {
+            // Lost datagram(s): the byte offsets shifted, so the partial frame is
+            // unusable. Drop it; the sync hunt below re-locks on the next frame.
+            out.gap = true
+            fill = 0
+        }
+        expectedSequence = sequence &+ 1
 
-        for usbOffset in [8, 520] {
-            guard data[usbOffset] == HPSDRProtocol1.sync,
-                  data[usbOffset + 1] == HPSDRProtocol1.sync,
-                  data[usbOffset + 2] == HPSDRProtocol1.sync else {
-                continue
-            }
-            let c0 = data[usbOffset + 3]
-            status.ptt = c0 & 0x01 != 0
-            status.dash = c0 & 0x02 != 0
-            status.dot = c0 & 0x04 != 0
-            let statusBlock = (c0 >> 3) & 0x1F
-            if statusBlock == 0 {
-                status.adcOverflow = data[usbOffset + 4] & 0x01 != 0
-                status.versionC2 = data[usbOffset + 5]
-                status.versionC3 = data[usbOffset + 6]
-                status.versionC4 = data[usbOffset + 7]
-            }
-
-            // Decode every receiver's I/Q from each interleaved group. Within a group,
-            // receiver rx occupies bytes [rx*6 ..< rx*6+6] (I: 3, Q: 3); mic trails.
-            let sampleBase = usbOffset + HPSDRProtocol1.usbHeaderSize
-            let sampleAreaSize = HPSDRProtocol1.usbFrameSize - HPSDRProtocol1.usbHeaderSize
-            let groupCount = sampleAreaSize / bytesPerGroup
-            for group in 0..<groupCount {
-                let groupBase = sampleBase + group * bytesPerGroup
-                for rx in 0..<rxCount {
-                    let p = groupBase + rx * 6
-                    let i = HPSDRProtocol1.sample24(data[p], data[p + 1], data[p + 2])
-                    let q = HPSDRProtocol1.sample24(data[p + 3], data[p + 4], data[p + 5])
-                    // Raw I/Q (no conjugation here) so the panadapter shows the correct
-                    // orientation. WDSP gets a conjugated copy in WDSPRadio.
-                    receivers[rx].append(Float(i) * scale)
-                    receivers[rx].append(Float(q) * scale)
-                }
+        // Append the payload; an (impossible in practice) overflow drops history.
+        let payloadCount = length - 8
+        if fill + payloadCount > buffer.count { fill = 0 }
+        buffer.withUnsafeMutableBufferPointer { dst in
+            data.withUnsafeBufferPointer { src in
+                (dst.baseAddress! + fill).update(from: src.baseAddress! + 8,
+                                                 count: payloadCount)
             }
         }
-        return EP6Result(sequence: sequence, status: status, receivers: receivers)
+        fill += payloadCount
+
+        // Decode every complete USB frame, hunting for sync where needed.
+        let frameSize = HPSDRProtocol1.usbFrameSize
+        var pos = 0
+        buffer.withUnsafeBufferPointer { buf in
+            let d = buf.baseAddress!
+            while fill - pos >= frameSize {
+                if d[pos] == HPSDRProtocol1.sync,
+                   d[pos + 1] == HPSDRProtocol1.sync,
+                   d[pos + 2] == HPSDRProtocol1.sync {
+                    Self.decodeUSBFrame(d + pos, rxCount: rxCount, into: &out)
+                    pos += frameSize
+                    continue
+                }
+                // Junk (or a shifted stream start): hunt for the next sync word.
+                resyncs += 1
+                var found = -1
+                var i = pos + 1
+                while i <= fill - 3 {
+                    if d[i] == HPSDRProtocol1.sync, d[i + 1] == HPSDRProtocol1.sync,
+                       d[i + 2] == HPSDRProtocol1.sync {
+                        found = i
+                        break
+                    }
+                    i += 1
+                }
+                if found < 0 {
+                    // No sync in view: keep only the last 2 bytes (a possibly
+                    // split sync word) and wait for more data.
+                    pos = max(pos, fill - 2)
+                    break
+                }
+                pos = found
+            }
+        }
+
+        // Compact the remainder to the front.
+        if pos > 0 {
+            buffer.withUnsafeMutableBufferPointer { buf in
+                let d = buf.baseAddress!
+                memmove(d, d + pos, fill - pos)
+            }
+            fill -= pos
+        }
+        return out
+    }
+
+    /// Decodes one 512-byte USB frame (sync + C0–C4 + interleaved sample groups),
+    /// identical to the fixed-offset logic in `HPSDRFrame.parseEP6`.
+    private static func decodeUSBFrame(_ d: UnsafePointer<UInt8>, rxCount: Int,
+                                       into out: inout Output) {
+        let c0 = d[3]
+        out.status.ptt = c0 & 0x01 != 0
+        out.status.dash = c0 & 0x02 != 0
+        out.status.dot = c0 & 0x04 != 0
+        let statusBlock = (c0 >> 3) & 0x1F
+        if statusBlock == 0 {
+            out.status.adcOverflow = d[4] & 0x01 != 0
+            out.status.versionC2 = d[5]
+            out.status.versionC3 = d[6]
+            out.status.versionC4 = d[7]
+        }
+
+        let bytesPerGroup = 6 * rxCount + 2
+        let sampleAreaSize = HPSDRProtocol1.usbFrameSize - HPSDRProtocol1.usbHeaderSize
+        let groupCount = sampleAreaSize / bytesPerGroup
+        let scale: Float = 1.0 / 8_388_608.0 // 2^23
+        for rx in 0..<rxCount { out.receivers[rx].reserveCapacity(groupCount * 2) }
+        for group in 0..<groupCount {
+            let groupBase = HPSDRProtocol1.usbHeaderSize + group * bytesPerGroup
+            for rx in 0..<rxCount {
+                let p = groupBase + rx * 6
+                let i = HPSDRProtocol1.sample24(d[p], d[p + 1], d[p + 2])
+                let q = HPSDRProtocol1.sample24(d[p + 3], d[p + 4], d[p + 5])
+                out.receivers[rx].append(Float(i) * scale)
+                out.receivers[rx].append(Float(q) * scale)
+            }
+        }
     }
 }
