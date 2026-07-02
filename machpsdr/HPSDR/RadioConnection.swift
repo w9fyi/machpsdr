@@ -180,7 +180,11 @@ actor RadioConnection {
         for i in 0..<activeSliceCount {
             mix.setSlice(i, ring: engines[i].ring, pan: engines[i].pan, enabled: true)
         }
-        try? mix.start()
+        do {
+            try mix.start()
+        } catch {
+            NSLog("RadioConnection: audio mixer failed to start (\(error)); streaming continues silently.")
+        }
         self.mixer = mix
 
         // Launch the combined send/receive loop on a dedicated thread.
@@ -365,7 +369,11 @@ actor RadioConnection {
         for i in 0..<activeSliceCount {
             mix.setSlice(i, ring: engines[i].ring, pan: engines[i].pan, enabled: true)
         }
-        try? mix.start()
+        do {
+            try mix.start()
+        } catch {
+            NSLog("RadioConnection: audio mixer failed to restart on device change (\(error)); audio muted.")
+        }
         mixer = mix
     }
 

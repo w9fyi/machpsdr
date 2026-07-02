@@ -62,9 +62,8 @@ nonisolated final class AudioInput: @unchecked Sendable {
             guard let channel = outBuffer.floatChannelData?[0] else { return }
             let count = Int(outBuffer.frameLength)
             guard count > 0 else { return }
-            var samples = [Float](repeating: 0, count: count)
-            for i in 0..<count { samples[i] = channel[i] }
-            ringRef.write(samples)
+            // Write straight from the converter's buffer — no per-callback allocation.
+            ringRef.write(channel, count: count)
         }
 
         engine.prepare()

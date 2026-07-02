@@ -35,7 +35,7 @@ nonisolated final class SpectrumAnalyzer: @unchecked Sendable {
     let fftSize: Int
     let buffer: SpectrumBuffer
 
-    private let setup: vDSP_DFT_Setup
+    private let setup: vDSP_DFT_Setup?
     private var window: [Float]
 
     // Accumulation of incoming complex samples until a full FFT frame is ready.
@@ -58,7 +58,10 @@ nonisolated final class SpectrumAnalyzer: @unchecked Sendable {
     init(buffer: SpectrumBuffer, fftSize: Int = 2048) {
         self.buffer = buffer
         self.fftSize = fftSize
-        self.setup = vDSP_DFT_zop_CreateSetup(nil, vDSP_Length(fftSize), .FORWARD)!
+        self.setup = vDSP_DFT_zop_CreateSetup(nil, vDSP_Length(fftSize), .FORWARD)
+        if self.setup == nil {
+            NSLog("SpectrumAnalyzer: vDSP DFT setup failed for size \(fftSize); spectrum disabled.")
+        }
         window = [Float](repeating: 0, count: fftSize)
         vDSP_hann_window(&window, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
         accI = [Float](repeating: 0, count: fftSize)
@@ -73,7 +76,7 @@ nonisolated final class SpectrumAnalyzer: @unchecked Sendable {
         averaged = [Float](repeating: -120, count: fftSize)
     }
 
-    deinit { vDSP_DFT_DestroySetup(setup) }
+    deinit { if let setup { vDSP_DFT_DestroySetup(setup) } }
 
     /// Feeds interleaved I/Q (i0,q0,i1,q1,…). Produces spectra as frames fill.
     func ingest(_ iq: [Float], centerHz: UInt32, spanHz: Int) {
@@ -95,6 +98,7 @@ nonisolated final class SpectrumAnalyzer: @unchecked Sendable {
     }
 
     private func computeSpectrum(centerHz: UInt32, spanHz: Int) {
+        guard let setup else { return }
         let n = vDSP_Length(fftSize)
         // Window the I and Q.
         vDSP_vmul(accI, 1, window, 1, &winI, 1, n)

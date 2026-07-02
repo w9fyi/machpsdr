@@ -24,7 +24,10 @@ nonisolated final class AudioOutput: @unchecked Sendable {
         scratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchCapacity)
         scratch.initialize(repeating: 0, count: scratchCapacity)
 
-        let format = AVAudioFormat(standardFormatWithSampleRate: AudioOutput.sampleRate, channels: 2)!
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: AudioOutput.sampleRate, channels: 2) else {
+            NSLog("AudioOutput: could not create \(Int(AudioOutput.sampleRate)) Hz stereo format; output disabled.")
+            return
+        }
         let capacity = scratchCapacity
         let scratchPtr = scratch
         let ringRef = ring

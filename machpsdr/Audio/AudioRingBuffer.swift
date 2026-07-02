@@ -23,10 +23,20 @@ nonisolated final class AudioRingBuffer: @unchecked Sendable {
     /// Producer: append samples, overwriting the oldest if full.
     func write(_ samples: [Float]) {
         guard !samples.isEmpty else { return }
+        samples.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            write(base, count: buf.count)
+        }
+    }
+
+    /// Producer: append `count` samples from a raw pointer. Allocation-free, so it
+    /// is safe to call directly from an audio tap/render callback.
+    func write(_ samples: UnsafePointer<Float>, count: Int) {
+        guard count > 0 else { return }
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
-        for sample in samples {
-            storage[writeIndex] = sample
+        for k in 0..<count {
+            storage[writeIndex] = samples[k]
             writeIndex = (writeIndex + 1) % capacity
             if available < capacity {
                 available += 1

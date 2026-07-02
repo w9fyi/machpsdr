@@ -46,7 +46,10 @@ nonisolated final class SliceAudioMixer: @unchecked Sendable {
         scratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchCapacity)
         scratch.initialize(repeating: 0, count: scratchCapacity)
 
-        let format = AVAudioFormat(standardFormatWithSampleRate: Self.sampleRate, channels: 2)!
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: Self.sampleRate, channels: 2) else {
+            NSLog("SliceAudioMixer: could not create \(Int(Self.sampleRate)) Hz stereo format; mixer disabled.")
+            return
+        }
         let node = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList in
             self?.render(frameCount: frameCount, audioBufferList: audioBufferList) ?? noErr
         }
