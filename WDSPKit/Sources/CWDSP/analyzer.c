@@ -951,8 +951,8 @@ void SetAnalyzer (	int disp,			// display identifier
 			{
 				if (a->plan[i][j])		fftw_destroy_plan (a->plan[i][j]);
 				if (a->Cplan[i][j])		fftw_destroy_plan (a->Cplan[i][j]);
-				a->plan[i][j] = fftw_plan_dft_r2c_1d(sz, a->fft_in[i][j], a->fft_out[i][j], FFTW_PATIENT);
-				a->Cplan[i][j] = fftw_plan_dft_1d(sz, a->Cfft_in[i][j], a->fft_out[i][j], FFTW_FORWARD, FFTW_PATIENT);
+				a->plan[i][j] = fftw_plan_dft_r2c_1d(sz, a->fft_in[i][j], a->fft_out[i][j], FFTW_ESTIMATE);
+				a->Cplan[i][j] = fftw_plan_dft_1d(sz, a->Cfft_in[i][j], a->fft_out[i][j], FFTW_FORWARD, FFTW_ESTIMATE);
 			}
 	}
 

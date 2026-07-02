@@ -152,8 +152,8 @@ void calc_emph (EMPH a)
 	a->infilt = (double *)malloc0(2 * a->size * sizeof(complex));
 	a->product = (double *)malloc0(2 * a->size * sizeof(complex));
 	a->mults = fc_mults(a->size, a->f_low, a->f_high, -20.0 * log10(a->f_high / a->f_low), 0.0, a->ctype, a->rate, 1.0 / (2.0 * a->size), 0, 0);
-	a->CFor = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->infilt, (fftw_complex *)a->product, FFTW_FORWARD, FFTW_PATIENT);
-	a->CRev = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->product, (fftw_complex *)a->out, FFTW_BACKWARD, FFTW_PATIENT);
+	a->CFor = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->infilt, (fftw_complex *)a->product, FFTW_FORWARD, FFTW_ESTIMATE);
+	a->CRev = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->product, (fftw_complex *)a->out, FFTW_BACKWARD, FFTW_ESTIMATE);
 }
 
 void decalc_emph (EMPH a)

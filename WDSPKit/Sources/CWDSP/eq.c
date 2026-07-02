@@ -537,8 +537,8 @@ void calc_eq (EQ a)
 	a->scale = 1.0 / (double)(2 * a->size);
 	a->infilt = (double *)malloc0(2 * a->size * sizeof(complex));
 	a->product = (double *)malloc0(2 * a->size * sizeof(complex));
-	a->CFor = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->infilt, (fftw_complex *)a->product, FFTW_FORWARD, FFTW_PATIENT);
-	a->CRev = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->product, (fftw_complex *)a->out, FFTW_BACKWARD, FFTW_PATIENT);
+	a->CFor = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->infilt, (fftw_complex *)a->product, FFTW_FORWARD, FFTW_ESTIMATE);
+	a->CRev = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->product, (fftw_complex *)a->out, FFTW_BACKWARD, FFTW_ESTIMATE);
 	a->mults = eq_mults(a->size, a->nfreqs, a->F, a->G, a->samplerate, a->scale, a->ctfmode, a->wintype);
 }
 

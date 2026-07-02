@@ -32,7 +32,7 @@ double* fftcv_mults (int NM, double* c_impulse)
 	double* mults        = (double *) malloc0 (NM * sizeof (complex));
 	double* cfft_impulse = (double *) malloc0 (NM * sizeof (complex));
 	fftw_plan ptmp = fftw_plan_dft_1d(NM, (fftw_complex *) cfft_impulse,
-			(fftw_complex *) mults, FFTW_FORWARD, FFTW_PATIENT);
+			(fftw_complex *) mults, FFTW_FORWARD, FFTW_ESTIMATE);
 	memset (cfft_impulse, 0, NM * sizeof (complex));
 	// store complex coefs right-justified in the buffer
 	memcpy (&(cfft_impulse[NM - 2]), c_impulse, (NM / 2 + 1) * sizeof(complex));
@@ -89,7 +89,7 @@ double* fir_fsamp_odd (int N, double* A, int rtype, double scale, int wintype)
 	double* window;
 	double *fcoef     = (double *) malloc0 (N * sizeof (complex));
 	double *c_impulse = (double *) malloc0 (N * sizeof (complex));
-	fftw_plan ptmp = fftw_plan_dft_1d(N, (fftw_complex *)fcoef, (fftw_complex *)c_impulse, FFTW_BACKWARD, FFTW_PATIENT);
+	fftw_plan ptmp = fftw_plan_dft_1d(N, (fftw_complex *)fcoef, (fftw_complex *)c_impulse, FFTW_BACKWARD, FFTW_ESTIMATE);
 	double local_scale = 1.0 / (double)N;
 	for (i = 0; i <= mid; i++)
 	{
@@ -297,9 +297,9 @@ void analytic (int N, double* in, double* out)
 	double two_inv_N = 2.0 * inv_N;
 	double* x = (double *) malloc0 (N * sizeof (complex));
 	fftw_plan pfor = fftw_plan_dft_1d (N, (fftw_complex *) in,
-			(fftw_complex *) x, FFTW_FORWARD, FFTW_PATIENT);
+			(fftw_complex *) x, FFTW_FORWARD, FFTW_ESTIMATE);
 	fftw_plan prev = fftw_plan_dft_1d (N, (fftw_complex *) x,
-			(fftw_complex *) out, FFTW_BACKWARD, FFTW_PATIENT);
+			(fftw_complex *) out, FFTW_BACKWARD, FFTW_ESTIMATE);
 	fftw_execute (pfor);
 	x[0] *= inv_N;
 	x[1] *= inv_N;
@@ -330,9 +330,9 @@ void mp_imp (int N, double* fir, double* mpfir, int pfactor, int polarity)
 	double* newfreq = (double *) malloc0 (size * sizeof (complex));
 	memcpy (firpad, fir, N * sizeof (complex));
 	fftw_plan pfor = fftw_plan_dft_1d (size, (fftw_complex *) firpad,
-			(fftw_complex *) firfreq, FFTW_FORWARD, FFTW_PATIENT);
+			(fftw_complex *) firfreq, FFTW_FORWARD, FFTW_ESTIMATE);
 	fftw_plan prev = fftw_plan_dft_1d (size, (fftw_complex *) newfreq,
-			(fftw_complex *) impulse, FFTW_BACKWARD, FFTW_PATIENT);
+			(fftw_complex *) impulse, FFTW_BACKWARD, FFTW_ESTIMATE);
 	// print_impulse("orig_imp.txt", N, fir, 1, 0);
 	fftw_execute (pfor);
 	for (i = 0; i < size; i++)

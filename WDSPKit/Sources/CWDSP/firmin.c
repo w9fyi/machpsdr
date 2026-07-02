@@ -145,11 +145,11 @@ void plan_firopt (FIROPT a)
 	{
 		a->fftout[i] = (double *) malloc0 (2 * a->size * sizeof (complex));
 		a->fmask[i] = (double *) malloc0 (2 * a->size * sizeof (complex));
-		a->pcfor[i] = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->fftin, (fftw_complex *)a->fftout[i], FFTW_FORWARD, FFTW_PATIENT);
-		a->maskplan[i] = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->maskgen, (fftw_complex *)a->fmask[i], FFTW_FORWARD, FFTW_PATIENT);
+		a->pcfor[i] = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->fftin, (fftw_complex *)a->fftout[i], FFTW_FORWARD, FFTW_ESTIMATE);
+		a->maskplan[i] = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->maskgen, (fftw_complex *)a->fmask[i], FFTW_FORWARD, FFTW_ESTIMATE);
 	}
 	a->accum = (double *) malloc0 (2 * a->size * sizeof (complex));
-	a->crev = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->accum, (fftw_complex *)a->out, FFTW_BACKWARD, FFTW_PATIENT);
+	a->crev = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->accum, (fftw_complex *)a->out, FFTW_BACKWARD, FFTW_ESTIMATE);
 }
 
 void calc_firopt (FIROPT a)
@@ -310,12 +310,12 @@ void plan_fircore (FIRCORE a)
 		a->fftout[i]   = (double *) malloc0 (2 * a->size * sizeof (complex));
 		a->fmask[0][i] = (double *) malloc0 (2 * a->size * sizeof (complex));
 		a->fmask[1][i] = (double *) malloc0 (2 * a->size * sizeof (complex));
-		a->pcfor[i] = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->fftin, (fftw_complex *)a->fftout[i], FFTW_FORWARD, FFTW_PATIENT);
-		a->maskplan[0][i] = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->maskgen, (fftw_complex *)a->fmask[0][i], FFTW_FORWARD, FFTW_PATIENT);
-		a->maskplan[1][i] = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->maskgen, (fftw_complex *)a->fmask[1][i], FFTW_FORWARD, FFTW_PATIENT);
+		a->pcfor[i] = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->fftin, (fftw_complex *)a->fftout[i], FFTW_FORWARD, FFTW_ESTIMATE);
+		a->maskplan[0][i] = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->maskgen, (fftw_complex *)a->fmask[0][i], FFTW_FORWARD, FFTW_ESTIMATE);
+		a->maskplan[1][i] = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->maskgen, (fftw_complex *)a->fmask[1][i], FFTW_FORWARD, FFTW_ESTIMATE);
 	}
 	a->accum = (double *) malloc0 (2 * a->size * sizeof (complex));
-	a->crev = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->accum, (fftw_complex *)a->out, FFTW_BACKWARD, FFTW_PATIENT);
+	a->crev = fftw_plan_dft_1d(2 * a->size, (fftw_complex *)a->accum, (fftw_complex *)a->out, FFTW_BACKWARD, FFTW_ESTIMATE);
 	a->masks_ready = 0;
 }
 

@@ -67,7 +67,7 @@ SIPHON create_siphon (int run, int position, int mode, int disp, int insize,
 	a->idx = 0;
 	a->sipout  = (double *) malloc0 (a->sipsize * sizeof (complex));
 	a->specout = (double *) malloc0 (a->fftsize * sizeof (complex));
-	a->sipplan = fftw_plan_dft_1d (a->fftsize, (fftw_complex *)a->sipout, (fftw_complex *)a->specout, FFTW_FORWARD, FFTW_PATIENT);
+	a->sipplan = fftw_plan_dft_1d (a->fftsize, (fftw_complex *)a->sipout, (fftw_complex *)a->specout, FFTW_FORWARD, FFTW_ESTIMATE);
 	a->window  = (double *) malloc0 (a->fftsize * sizeof (complex));
 	InitializeCriticalSectionAndSpinCount(&a->update, 2500);
 	build_window (a);

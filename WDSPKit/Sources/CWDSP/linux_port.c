@@ -48,6 +48,12 @@ void InitializeCriticalSectionAndSpinCount(pthread_mutex_t *mutex,int count) {
 #ifdef __APPLE__
 	// DL1YCF: MacOS X does not have PTHREAD_MUTEX_RECURSIVE_NP
 	pthread_mutexattr_settype(&mAttr,PTHREAD_MUTEX_RECURSIVE);
+	// macOS pthread mutexes default to the FIRSTFIT (unfair) policy: the channel's
+	// DSP worker thread, re-acquiring csDSP in its block loop, can starve a control
+	// setter (SetRXAAGCTop etc.) for hundreds of milliseconds — observed live as
+	// audio dropouts on every slider move. FAIRSHARE hands the lock off FIFO, so a
+	// setter waits at most one processing block.
+	pthread_mutexattr_setpolicy_np(&mAttr, PTHREAD_MUTEX_POLICY_FAIRSHARE_NP);
 #else
 	pthread_mutexattr_settype(&mAttr,PTHREAD_MUTEX_RECURSIVE_NP);
 #endif
