@@ -1,4 +1,5 @@
 import Foundation
+import Accelerate
 import Darwin
 
 /// A throttled snapshot of the live stream, delivered to UI/consumers ~10×/second.
@@ -22,15 +23,30 @@ private nonisolated final class SettingsBox: @unchecked Sendable {
     }
 }
 
-/// Thread-safe holder for the live socket file descriptor. The actor sets it on
-/// start/stop; the I/O thread reads it every iteration so the socket can be swapped
+/// Thread-safe holder for the live socket file descriptor plus the EP2 sequence
+/// number the run loop should continue from (the socket bring-up sends priming EP2
+/// frames, so the loop must not restart the sequence — the radio would see it go
+/// backward). The I/O thread reads it every iteration so the socket can be swapped
 /// out from under the run loop (the mid-stream socket rebuild on slice-count change).
 private nonisolated final class SocketBox: @unchecked Sendable {
     private var lock = os_unfair_lock()
-    private var value: Int32 = -1
+    private var fd: Int32 = -1
+    private var seq: UInt32 = 0
     var current: Int32 {
-        get { os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }; return value }
-        set { os_unfair_lock_lock(&lock); value = newValue; os_unfair_lock_unlock(&lock) }
+        get { os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }; return fd }
+        set { os_unfair_lock_lock(&lock); fd = newValue; os_unfair_lock_unlock(&lock) }
+    }
+    /// Atomically installs a new socket and the EP2 sequence to continue from.
+    func swap(fd newFD: Int32, nextSeq: UInt32) {
+        os_unfair_lock_lock(&lock)
+        fd = newFD
+        seq = nextSeq
+        os_unfair_lock_unlock(&lock)
+    }
+    var snapshot: (fd: Int32, nextSeq: UInt32) {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return (fd, seq)
     }
 }
 
@@ -62,6 +78,27 @@ actor RadioConnection {
     /// the ANAN-10E gateware supports up to 4 DDCs and the Protocol-1 receiver-count
     /// field maxes at 8, so the on-air count is clamped in `setActiveSliceCount`.
     static let maxSlices = 10
+
+    // Experiments from the add-slice investigation, OFF until verified live — with
+    // both off, the bring-up and EP2 cadence match the last-known-good behavior
+    // (plain STOP→drain→START on a fresh socket, one EP2 per run-loop iteration).
+    //
+    /// Prime config while stopped + double-start before the final START. Risk: it
+    /// reprograms the layout on a RUNNING stream and then relies on a same-socket
+    /// STOP/START to realign — previously observed NOT to realign on this gateware,
+    /// which leaves the radio's actual rate/layout disagreeing with `settings` and
+    /// produces exactly the "garbled, whole-spectrum" audio (wrong decimation factor).
+    private static let experimentalPrimedBringUp = false
+
+    /// The radio consumes EP2 at its fixed 48 kHz TX/C&C clock: 48000/126 samples ≈
+    /// 381 frames/s, one frame every 2.625 ms — independent of the RX stream rate.
+    private static let ep2PeriodNs: UInt64 = 126 * 1_000_000_000 / 48_000
+
+    /// Silence cushion (samples @ 48 kHz) primed into a slice's audio ring at start
+    /// and whenever it is reset (retune, mode change, slice add). 100 ms of latency
+    /// buys immunity to producer/consumer scheduling jitter — see
+    /// `AudioRingBuffer.reset(primingSilence:)` for why an empty ring stays choppy.
+    private static let audioPrimeSamples = 4_800
 
     // Receive path: one DSP + spectrum chain per slice. Engines and spectra are
     // pre-allocated for maxSlices; only the first `activeSliceCount` are opened,
@@ -107,7 +144,9 @@ actor RadioConnection {
         self.engines = engines
         self.activeSliceCount = max(1, min(Self.maxSlices, settings.receiverCount))
         var continuation: AsyncStream<StreamUpdate>.Continuation!
-        self.updates = AsyncStream { continuation = $0 }
+        // Only the latest snapshot matters; never let updates queue up behind a
+        // stalled consumer.
+        self.updates = AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation = $0 }
         self.updateContinuation = continuation
     }
 
@@ -115,14 +154,20 @@ actor RadioConnection {
     var settings: RadioSettings { settingsBox.current }
 
     /// Brings up a fresh UDP socket to the radio from a known-clean state: connect,
-    /// STOP, drain any in-flight/stale datagrams, then START so the USB sync word is
-    /// realigned to offset 8. Returns the connected fd, or nil on socket/connect failure.
+    /// STOP, drain any in-flight/stale datagrams, program the full configuration via
+    /// EP2 frames *while stopped*, then START so the stream begins already laid out
+    /// for `settings` with the USB sync word aligned at offset 8.
     ///
-    /// A *brand-new* socket is the only reliable way to make the ANAN re-frame — a
-    /// STOP/START on an already-streaming socket leaves the stream misaligned (the sync
-    /// word drifts off offset 8 and decode fails for every receiver). This is shared by
-    /// the initial connect and the mid-stream rebuild on slice-count change.
-    private static func openStreamSocket(ip: String) -> Int32? {
+    /// Priming before START is essential (piHPSDR/Thetis do the same): changing the
+    /// receiver count/rate on a *running* stream shifts the sample layout mid-frame
+    /// and the sync word drifts off offset 8 permanently (observed live: sync at
+    /// 110/622, zero decode, until the next aligned restart). Returns the connected
+    /// Returns the connected fd and the EP2 sequence number the send loop should
+    /// continue from (the priming frames consumed 0..<nextSeq), or nil on
+    /// socket/connect failure. Shared by the initial connect and the mid-stream
+    /// rebuild on slice-count change.
+    private static func openStreamSocket(ip: String,
+                                         settings: RadioSettings) -> (fd: Int32, nextSeq: UInt32)? {
         let socketFD = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
         guard socketFD >= 0 else { return nil }
 
@@ -138,36 +183,92 @@ actor RadioConnection {
         }
         guard connected == 0 else { close(socketFD); return nil }
 
+        // A deep kernel receive buffer (~2.5 s of EP6 at 48 kHz, ~0.6 s at 192 kHz)
+        // rides out I/O-thread stalls — e.g. a burst of queued WDSP commands from a
+        // slider drag — as latency instead of dropped packets and audio gaps.
+        var rcvBufBytes: Int32 = 1_048_576
+        setsockopt(socketFD, SOL_SOCKET, SO_RCVBUF, &rcvBufBytes, socklen_t(MemoryLayout<Int32>.size))
+
         var drainTimeout = timeval(tv_sec: 0, tv_usec: 50_000)
         setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &drainTimeout, socklen_t(MemoryLayout<timeval>.size))
         let stopPacket = HPSDRProtocol1.stopCommand()
-        _ = stopPacket.withUnsafeBytes { send(socketFD, $0.baseAddress, $0.count, 0) }
-        usleep(100_000)   // 100 ms for the radio to halt its stream
+        let startPacket = HPSDRProtocol1.startCommand(iq: true)
         var drain = [UInt8](repeating: 0, count: 2048)
-        let drainDeadline = Date().addingTimeInterval(0.4)
-        while Date() < drainDeadline {
-            let n = drain.withUnsafeMutableBytes { recv(socketFD, $0.baseAddress, $0.count, 0) }
-            if n <= 0 { break }   // socket empty (recv timed out) → pipe is clear
+        func sendStop() { _ = stopPacket.withUnsafeBytes { send(socketFD, $0.baseAddress, $0.count, 0) } }
+        func sendStart() { _ = startPacket.withUnsafeBytes { send(socketFD, $0.baseAddress, $0.count, 0) } }
+        func drainUntilQuiet() {
+            let deadline = Date().addingTimeInterval(0.4)
+            while Date() < deadline {
+                let n = drain.withUnsafeMutableBytes { recv(socketFD, $0.baseAddress, $0.count, 0) }
+                if n <= 0 { break }   // socket empty (recv timed out) → pipe is clear
+            }
+        }
+
+        // From a known-clean state: stop whatever stream is running and flush it.
+        sendStop()
+        usleep(100_000)   // 100 ms for the radio to halt its stream
+        drainUntilQuiet()
+
+        var primeSeq: UInt32 = 0
+        if Self.experimentalPrimedBringUp {
+            // Prime the FPGA while stopped, the way piHPSDR's restart does: pair the
+            // config slot (receiver count + rate + duplex) with every other slot,
+            // 20 ms apart (config, TX freq, drive, attenuator, all RX freqs).
+            var frame = [UInt8](repeating: 0, count: HPSDRProtocol1.frameSize)
+            let slots = settings.commandSlotCount
+            for other in 1..<slots {
+                HPSDRFrame.buildEP2(into: &frame, sequence: primeSeq, settings: settings,
+                                    slot1: 0, slot2: other)
+                _ = frame.withUnsafeBytes { send(socketFD, $0.baseAddress, $0.count, 0) }
+                primeSeq &+= 1
+                usleep(20_000)
+            }
+
+            // Double-start: this gateware honors C&C reliably only on a RUNNING stream
+            // (live tuning works, but a receiver count primed while stopped never took —
+            // the stream stayed at the old layout's packet rate). So START, program the
+            // config on the running stream while discarding its old-layout frames, then
+            // STOP and START once more so the radio latches the new receiver count/rate
+            // into a cleanly aligned stream from the first frame.
+            sendStart()
+            for i in 0..<24 {
+                _ = drain.withUnsafeMutableBytes { recv(socketFD, $0.baseAddress, $0.count, 0) }
+                HPSDRFrame.buildEP2(into: &frame, sequence: primeSeq, settings: settings,
+                                    slot1: 0, slot2: 1 + i % (slots - 1))
+                _ = frame.withUnsafeBytes { send(socketFD, $0.baseAddress, $0.count, 0) }
+                primeSeq &+= 1
+                usleep(3_000)
+            }
+            sendStop()
+            usleep(100_000)
+            drainUntilQuiet()
         }
 
         var rcvTimeout = timeval(tv_sec: 0, tv_usec: 200_000)
         setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, socklen_t(MemoryLayout<timeval>.size))
 
-        // Send Metis START (I/Q streaming).
-        let startPacket = HPSDRProtocol1.startCommand(iq: true)
-        _ = startPacket.withUnsafeBytes { send(socketFD, $0.baseAddress, $0.count, 0) }
-        return socketFD
+        // Final START: the stream begins in the requested layout.
+        sendStart()
+        return (socketFD, primeSeq)
     }
 
     /// Opens the socket, sends Metis start, and begins the stream loop.
     func start() throws {
-        guard fd < 0 else { return } // already started
+        guard fd < 0, worker == nil else { return } // already started
 
-        guard let socketFD = Self.openStreamSocket(ip: radio.ipAddress) else {
+        // `activeSliceCount` is authoritative for a fresh start (a mid-stream slice
+        // change applies receiverCount inside its rebuild command, which is dropped
+        // if the user disconnects first).
+        var s = settingsBox.current
+        s.receiverCount = activeSliceCount
+        settingsBox.current = s
+
+        guard let stream = Self.openStreamSocket(ip: radio.ipAddress,
+                                                 settings: settingsBox.current) else {
             throw DiscoveryError.socketCreationFailed(errno)
         }
 
-        self.fd = socketFD
+        socketBox.swap(fd: stream.fd, nextSeq: stream.nextSeq)
         running.set(true)
 
         // Open the active slices' WDSP receiver channels and the transmitter.
@@ -175,9 +276,11 @@ actor RadioConnection {
         wdspTx.open(mode: currentMode)
 
         // Start the audio mixer over the active slices. If it fails, streaming still
-        // proceeds (silent).
+        // proceeds (silent). Rings are primed so playback starts with a jitter
+        // cushion instead of racing the first WDSP blocks.
         let mix = SliceAudioMixer(deviceUID: audioOutputUID)
         for i in 0..<activeSliceCount {
+            engines[i].ring.reset(primingSilence: Self.audioPrimeSamples)
             mix.setSlice(i, ring: engines[i].ring, pan: engines[i].pan, enabled: true)
         }
         do {
@@ -210,17 +313,20 @@ actor RadioConnection {
         thread.start()
     }
 
-    /// Sends Metis stop, tears down the loop, and closes the socket.
+    /// Tears down the loop. The I/O thread owns the socket and the WDSP channels: on
+    /// its way out it sends the Metis STOP, closes the fd, and closes the channels.
+    /// Closing them here would race an in-flight recv/fexchange0 on the I/O thread —
+    /// exactly the WDSP concurrency wedge the DSP command queue exists to prevent.
     func stop() {
-        guard fd >= 0 else { return }
+        guard running.get() || fd >= 0 else { return }
         running.set(false)
-        let stopPacket = HPSDRProtocol1.stopCommand()
-        _ = stopPacket.withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) }
-        close(fd)
-        fd = -1
+        // Wait for the loop to exit (bounded: one recv timeout + one command batch).
+        if let worker {
+            let deadline = Date().addingTimeInterval(2)
+            while !worker.isFinished && Date() < deadline { usleep(10_000) }
+        }
         worker = nil
-        for engine in engines { engine.wdsp.close() }
-        wdspTx.close()
+        fd = -1
         audioInput?.stop()
         audioInput = nil
         micRing.clear()
@@ -232,16 +338,21 @@ actor RadioConnection {
 
     /// Enqueues a WDSP operation to run on the DSP thread (WDSP is not thread-safe on
     /// macOS). No-op when not streaming — the session re-applies settings on connect.
-    private func dsp(_ command: @escaping @Sendable () -> Void) {
-        guard fd >= 0 else { return }
-        dspCommands.enqueue(command)
+    /// Gated on `running` (not the fd) so commands still work while the socket is
+    /// down after a failed mid-stream rebuild — that's how a retry gets in.
+    private func dsp(key: String? = nil, _ command: @escaping @Sendable () -> Void) {
+        guard running.get() else { return }
+        dspCommands.enqueue(key: key, command)
     }
 
-    /// Enqueues a WDSP RX operation for a specific slice's channel.
-    private func runOnSlice(_ index: Int, _ op: @escaping @Sendable (WDSPRadio) -> Void) {
+    /// Enqueues a WDSP RX operation for a specific slice's channel. Pass `key` for
+    /// slider-driven setters so a drag coalesces to the latest value (see
+    /// `DSPCommandQueue.enqueue`); the key is namespaced per slice automatically.
+    private func runOnSlice(_ index: Int, key: String? = nil,
+                            _ op: @escaping @Sendable (WDSPRadio) -> Void) {
         guard engines.indices.contains(index) else { return }
         let engines = self.engines
-        dsp { op(engines[index].wdsp) }
+        dsp(key: key.map { "\($0).\(index)" }) { op(engines[index].wdsp) }
     }
 
     /// Sets a slice's demodulation mode. Slice 0 also sets the matching transmit mode.
@@ -253,7 +364,7 @@ actor RadioConnection {
         dsp {
             if slice == 0 { tx.setMode(mode) }
             engines[slice].wdsp.setMode(mode)
-            engines[slice].ring.clear()
+            engines[slice].ring.reset(primingSilence: RadioConnection.audioPrimeSamples)
         }
     }
 
@@ -334,7 +445,7 @@ actor RadioConnection {
     /// RX 3-band graphic EQ.
     func setRXEQ(on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setEQ(on: on) } }
     func setRXEQGains(preamp: Int, low: Int, mid: Int, high: Int, slice: Int = 0) {
-        runOnSlice(slice) { $0.setEQGains(preamp: preamp, low: low, mid: mid, high: high) }
+        runOnSlice(slice, key: "eqGains") { $0.setEQGains(preamp: preamp, low: low, mid: mid, high: high) }
     }
 
     /// Sets the 7-bit open-collector output pattern (amp band data). Applied on the
@@ -346,19 +457,19 @@ actor RadioConnection {
     }
 
     /// Sets a slice's CW sidetone pitch (Hz).
-    func setCWPitch(_ hz: Double, slice: Int = 0) { runOnSlice(slice) { $0.setCWPitch(hz) } }
+    func setCWPitch(_ hz: Double, slice: Int = 0) { runOnSlice(slice, key: "cwPitch") { $0.setCWPitch(hz) } }
 
     /// Sets a slice's CW filter width in Hz.
-    func setFilterWidth(_ width: Double, slice: Int = 0) { runOnSlice(slice) { $0.setFilterWidth(width) } }
+    func setFilterWidth(_ width: Double, slice: Int = 0) { runOnSlice(slice, key: "filterWidth") { $0.setFilterWidth(width) } }
 
     /// Sets a slice's SSB/DIGI low-cut edge (Hz).
-    func setLowCut(_ hz: Double, slice: Int = 0) { runOnSlice(slice) { $0.setLowCut(hz) } }
+    func setLowCut(_ hz: Double, slice: Int = 0) { runOnSlice(slice, key: "lowCut") { $0.setLowCut(hz) } }
 
     /// Sets a slice's high-cut / bandwidth edge (Hz).
-    func setHighCut(_ hz: Double, slice: Int = 0) { runOnSlice(slice) { $0.setHighCut(hz) } }
+    func setHighCut(_ hz: Double, slice: Int = 0) { runOnSlice(slice, key: "highCut") { $0.setHighCut(hz) } }
 
     /// Sets a slice's audio volume (0…1).
-    func setVolume(_ volume: Float, slice: Int = 0) { runOnSlice(slice) { $0.setVolume(volume) } }
+    func setVolume(_ volume: Float, slice: Int = 0) { runOnSlice(slice, key: "volume") { $0.setVolume(volume) } }
 
     /// Sets a slice's stereo pan (−1 = hard left, 0 = center, +1 = hard right).
     func setPan(_ pan: Float, slice: Int = 0) {
@@ -388,7 +499,7 @@ actor RadioConnection {
     /// AGC time-constant profile (0 off … 4 fast).
     func setAGCMode(_ mode: Int, slice: Int = 0) { runOnSlice(slice) { $0.setAGCMode(mode) } }
     /// AGC-T: maximum AGC gain in dB.
-    func setAGCTop(_ db: Double, slice: Int = 0) { runOnSlice(slice) { $0.setAGCTop(db) } }
+    func setAGCTop(_ db: Double, slice: Int = 0) { runOnSlice(slice, key: "agcTop") { $0.setAGCTop(db) } }
 
     /// RX ADC step attenuator (0–31 dB; 0 = max gain). Applied on the next command frame.
     func setRXAttenuator(_ db: UInt8) {
@@ -403,31 +514,31 @@ actor RadioConnection {
     func setSpectralNRNPEMethod(_ method: Int, slice: Int = 0) { runOnSlice(slice) { $0.setSpectralNRNPEMethod(method) } }
     func setSpectralNRArtifactReduction(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setSpectralNRArtifactReduction(on) } }
     func setANR(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setANR(on) } }
-    func setANRStrength(_ taps: Int, slice: Int = 0) { runOnSlice(slice) { $0.setANRStrength(taps) } }
+    func setANRStrength(_ taps: Int, slice: Int = 0) { runOnSlice(slice, key: "anrTaps") { $0.setANRStrength(taps) } }
     func setANF(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setANF(on) } }
     func setNoiseBlanker(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setNoiseBlanker(on) } }
-    func setNoiseBlankerThreshold(_ threshold: Double, slice: Int = 0) { runOnSlice(slice) { $0.setNoiseBlankerThreshold(threshold) } }
+    func setNoiseBlankerThreshold(_ threshold: Double, slice: Int = 0) { runOnSlice(slice, key: "nbThresh") { $0.setNoiseBlankerThreshold(threshold) } }
     func setNoiseBlanker2(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setNoiseBlanker2(on) } }
     func setNoiseBlanker2Mode(_ mode: Int, slice: Int = 0) { runOnSlice(slice) { $0.setNoiseBlanker2Mode(mode) } }
-    func setNoiseBlanker2Threshold(_ threshold: Double, slice: Int = 0) { runOnSlice(slice) { $0.setNoiseBlanker2Threshold(threshold) } }
+    func setNoiseBlanker2Threshold(_ threshold: Double, slice: Int = 0) { runOnSlice(slice, key: "nb2Thresh") { $0.setNoiseBlanker2Threshold(threshold) } }
 
     /// Squelch (AM/SAM level squelch via AMSQ, FM via FMSQ), per slice.
     func setSquelch(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setSquelch(on) } }
-    func setSquelchLevel(_ level: Double, slice: Int = 0) { runOnSlice(slice) { $0.setSquelchLevel(level) } }
+    func setSquelchLevel(_ level: Double, slice: Int = 0) { runOnSlice(slice, key: "sqlLevel") { $0.setSquelchLevel(level) } }
 
     /// SNB spectral noise blanker, per slice.
     func setSNB(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setSNB(on) } }
 
     /// Manual notch filters (MNF), per slice. Notches carry absolute RF center + width.
     func setManualNotches(_ notches: [(freq: Double, width: Double, active: Bool)], slice: Int = 0) {
-        runOnSlice(slice) { $0.setManualNotches(notches) }
+        runOnSlice(slice, key: "notches") { $0.setManualNotches(notches) }
     }
     func setManualNotchRun(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setManualNotchRun(on) } }
-    func setTuneFrequency(_ hz: Double, slice: Int = 0) { runOnSlice(slice) { $0.setTuneFrequency(hz) } }
+    func setTuneFrequency(_ hz: Double, slice: Int = 0) { runOnSlice(slice, key: "tuneFreq") { $0.setTuneFrequency(hz) } }
 
     /// APF CW audio peaking filter, per slice.
     func setAPF(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setAPF(on) } }
-    func setAPFBandwidth(_ bw: Double, slice: Int = 0) { runOnSlice(slice) { $0.setAPFBandwidth(bw) } }
+    func setAPFBandwidth(_ bw: Double, slice: Int = 0) { runOnSlice(slice, key: "apfBW") { $0.setAPFBandwidth(bw) } }
 
     /// Tunes receiver `index` to `hz`. Applied on the next outgoing EP2 frame.
     func setFrequency(_ hz: UInt32, receiver index: Int = 0) {
@@ -436,10 +547,12 @@ actor RadioConnection {
         s.receiverFrequencies[index] = hz
         if index == 0 { s.transmitFrequency = hz }
         settingsBox.current = s
-        if engines.indices.contains(index) { engines[index].ring.clear() }
+        // The audio ring is deliberately NOT reset here: it holds ≤0.5 s, so a retune
+        // just plays a brief tail of the old frequency and flows into the new one —
+        // continuous audio while a MIDI knob spins (a per-tick reset silenced tuning).
         // Keep the slice's manual-notch database anchored to the new VFO frequency
         // so notches track their absolute RF targets as you tune.
-        runOnSlice(index) { $0.setTuneFrequency(Double(hz)) }
+        runOnSlice(index, key: "tuneFreq") { $0.setTuneFrequency(Double(hz)) }
     }
 
     /// Changes the number of active receive slices (1…maxSlices, clamped to what the
@@ -447,16 +560,20 @@ actor RadioConnection {
     func setActiveSliceCount(_ count: Int) {
         let n = max(1, min(Self.maxSlices, count))
         var s = settingsBox.current
-        s.receiverCount = n
         while s.receiverFrequencies.count < n {
             s.receiverFrequencies.append(s.receiverFrequencies.last ?? 7_100_000)
         }
+        // While streaming, the receiver count is applied inside the rebuild command,
+        // atomically with the socket swap: the count must NEVER change in the EP2
+        // frames sent on a running stream — the radio re-lays-out its samples
+        // mid-frame and the USB sync drifts off offset 8 (permanent misframe).
+        if !running.get() { s.receiverCount = n }
         settingsBox.current = s
 
         let previous = activeSliceCount
         activeSliceCount = n
-        NSLog("Slices: \(previous) -> \(n) (streaming: \(fd >= 0))")
-        guard fd >= 0 else { return }   // not streaming: start() opens the right count
+        NSLog("Slices: \(previous) -> \(n) (streaming: \(running.get()))")
+        guard running.get() else { return }   // not streaming: start() opens the right count
 
         // Open/close the WDSP channels on the DSP thread (see `dsp`). The mixer is
         // independently locked, so its (de)registration is safe to enqueue alongside.
@@ -467,11 +584,13 @@ actor RadioConnection {
         let mode = currentMode
         let ip = radio.ipAddress
         let socket = socketBox
+        let box = settingsBox
         dsp {
             // Adjust the per-slice WDSP channels for the new count.
             if n > previous {
                 for i in previous..<n {
                     engines[i].wdsp.open(mode: mode)
+                    engines[i].ring.reset(primingSilence: RadioConnection.audioPrimeSamples)
                     mixer?.setSlice(i, ring: engines[i].ring, pan: engines[i].pan, enabled: true)
                     NSLog("DSP: opened slice \(i) (ch \(2 + i))")
                 }
@@ -484,20 +603,23 @@ actor RadioConnection {
                 }
             }
             // The ANAN misframes when the receiver count changes mid-stream: the USB sync
-            // word drifts off offset 8 and decode dies for EVERY receiver. A STOP/START on
-            // the existing socket does NOT fix it — only a brand-new socket makes the radio
-            // re-frame (verified: a fresh connect at N receivers works, an in-place restart
-            // does not). So swap in a fresh socket here. settingsBox.receiverCount is already
-            // updated, so the config frames sent right after START carry the new count and
-            // the radio frames the new layout aligned from a clean boundary — exactly like a
-            // fresh connect. Runs on the I/O thread; the run loop reads the new fd from the
-            // box on its next iteration.
+            // word drifts off offset 8 and decode dies for EVERY receiver (observed live:
+            // sync at 110/622). So the sequence here is: stop the old stream, close its
+            // socket, THEN flip receiverCount in the settings box (the old socket never
+            // carries the new count), and bring up a fresh socket that programs the new
+            // layout via EP2 while stopped before START — the stream begins aligned.
+            // Runs on the I/O thread; the run loop reads the new fd on its next iteration.
             let old = socket.current
-            let stop = HPSDRProtocol1.stopCommand()
-            _ = stop.withUnsafeBytes { send(old, $0.baseAddress, $0.count, 0) }
-            close(old)
-            if let newFD = RadioConnection.openStreamSocket(ip: ip) {
-                socket.current = newFD
+            if old >= 0 {
+                let stop = HPSDRProtocol1.stopCommand()
+                _ = stop.withUnsafeBytes { send(old, $0.baseAddress, $0.count, 0) }
+                close(old)
+            }
+            var s2 = box.current
+            s2.receiverCount = n
+            box.current = s2
+            if let stream = RadioConnection.openStreamSocket(ip: ip, settings: box.current) {
+                socket.swap(fd: stream.fd, nextSeq: stream.nextSeq)
                 NSLog("DSP: rebuilt socket for \(n) receiver(s)")
             } else {
                 socket.current = -1
@@ -543,9 +665,10 @@ actor RadioConnection {
         var gapsInInterval = 0
         var rmsAccum: Double = 0
         var sampleCount = 0
-        var lastSeqIn: UInt32 = 0
-        var haveLastSeq = false
         var lastStatus = RadioStreamStatus()
+        // Byte-stream reassembler: decodes USB frames wherever the sync word lands,
+        // because the 10E restarts its stream at arbitrary offsets (see EP6Assembler).
+        let assembler = EP6Assembler()
         // Diagnostics: per-second decoded sample counts per slice (healthy ≈ 96000/s each).
         var dbgRx0Samples = 0
         var dbgRx1Samples = 0
@@ -553,54 +676,80 @@ actor RadioConnection {
         var dbgFlushCount = 0
         var dbgGaps = 0
         var dbgReceived = 0
-        var dbgHdr = "?"
-        var dbgSync = "?"
+        // Stall attribution: worst single command-drain and packet-process time (ms)
+        // plus commands executed, per log interval. A multi-second audio cutout shows
+        // up here as a huge maxDrain (slow WDSP setter) or maxProc (slow DSP path).
+        var dbgCmdCount = 0
+        var dbgMaxDrainMs = 0.0
+        var dbgMaxProcMs = 0.0
+
+        // Reused per-iteration buffers — the steady-state loop must not allocate.
+        var buffer = [UInt8](repeating: 0, count: 2048)
+        var ep2Frame = [UInt8](repeating: 0, count: HPSDRProtocol1.frameSize)
+        var frameIQ = [Float](repeating: 0, count: 252)
+        var lastFD: Int32 = -2
+        var nextEP2SendNs = DispatchTime.now().uptimeNanoseconds
+        var ep2SentInInterval = 0
+        var dbgEP2Sent = 0
 
         while running.get() {
             // Apply any queued WDSP operations (channel open/close, DSP control changes)
             // here — on this thread — so they never run concurrently with fexchange0.
             // A command may swap the socket (mid-stream rebuild), so read fd afterward.
-            for command in commands.drain() { command() }
-            let fd = socket.current
+            let pending = commands.drain()
+            if !pending.isEmpty {
+                let tDrain0 = DispatchTime.now().uptimeNanoseconds
+                for entry in pending {
+                    let tCmd0 = DispatchTime.now().uptimeNanoseconds
+                    entry.run()
+                    let cmdMs = Double(DispatchTime.now().uptimeNanoseconds &- tCmd0) / 1e6
+                    if cmdMs > 100 {
+                        NSLog("DSP: slow command '\(entry.key ?? "unkeyed")' took \(String(format: "%.0f", cmdMs))ms")
+                    }
+                }
+                dbgCmdCount += pending.count
+                let drainMs = Double(DispatchTime.now().uptimeNanoseconds &- tDrain0) / 1e6
+                if drainMs > dbgMaxDrainMs { dbgMaxDrainMs = drainMs }
+            }
+            let (fd, nextSeq) = socket.snapshot
+            if fd < 0 {
+                // Mid-stream socket rebuild failed. Idle (still draining commands so a
+                // later slice-count change can retry) instead of spinning on recv(EBADF).
+                usleep(200_000)
+                continue
+            }
+            if fd != lastFD {
+                // Fresh socket (initial start or mid-stream rebuild): the EP6 sequence
+                // restarts, and EP2 continues from where the priming frames left off.
+                assembler.reset()
+                seqOut = nextSeq
+                nextEP2SendNs = DispatchTime.now().uptimeNanoseconds
+                lastFD = fd
+            }
 
             let settingsSnapshot = settings.current
             let transmitting = transmit.transmitting
             let tuning = transmit.tune
 
             // Receive one EP6 datagram (blocks up to the socket timeout).
-            var buffer = [UInt8](repeating: 0, count: 2048)
             let received = buffer.withUnsafeMutableBytes { recv(fd, $0.baseAddress, $0.count, 0) }
-            if received > 522 {
-                dbgReceived = Int(received)
-                dbgHdr = String(format: "%02X %02X %02X %02X", buffer[0], buffer[1], buffer[2], buffer[3])
-                // Scan the whole datagram for the 7F 7F 7F USB sync word and report
-                // every offset it appears at (should be 8 and 520 in a standard frame).
-                var offsets: [Int] = []
-                var i = 0
-                let limit = Int(received) - 2
-                while i < limit {
-                    if buffer[i] == 0x7F && buffer[i + 1] == 0x7F && buffer[i + 2] == 0x7F {
-                        offsets.append(i)
-                        if offsets.count >= 6 { break }
-                    }
-                    i += 1
-                }
-                dbgSync = offsets.isEmpty ? "NONE" : offsets.map(String.init).joined(separator: ",")
-            }
+            if received > 522 { dbgReceived = Int(received) }
+            let tProc0 = DispatchTime.now().uptimeNanoseconds
             if received > 0,
-               let result = HPSDRFrame.parseEP6(Array(buffer.prefix(Int(received))),
-                                                receiverCount: settingsSnapshot.receiverCount) {
+               let result = assembler.feed(buffer, length: Int(received),
+                                           receiverCount: settingsSnapshot.receiverCount) {
                 packetsInInterval += 1
-                if haveLastSeq && result.sequence != lastSeqIn &+ 1 { gapsInInterval += 1 }
-                lastSeqIn = result.sequence
-                haveLastSeq = true
-                lastStatus = result.status
+                if result.gap { gapsInInterval += 1 }
+                // Empty samples = no USB frame completed this datagram (assembler is
+                // mid-frame or hunting for sync); status would be default-empty then.
+                if !result.samples.isEmpty { lastStatus = result.status }
                 // While transmitting, skip the receive DSP so the send loop keeps full rate.
                 if !transmitting {
                     let span = settingsSnapshot.sampleRate.hertz
                     let rxCount = min(result.receivers.count, engines.count)
                     for rx in 0..<rxCount {
                         let iq = result.receivers[rx]
+                        guard !iq.isEmpty else { continue }
                         engines[rx].wdsp.process(iq: iq, inputRate: span)
                         let centerHz = rx < settingsSnapshot.receiverFrequencies.count
                             ? settingsSnapshot.receiverFrequencies[rx] : 0
@@ -608,68 +757,95 @@ actor RadioConnection {
                     }
                     // RMS from slice 0 drives the summary signal meter.
                     let s0 = result.samples
-                    var k = 0
-                    while k < s0.count { rmsAccum += Double(s0[k]) * Double(s0[k]); k += 1 }
-                    sampleCount += s0.count
+                    if !s0.isEmpty {
+                        var sumsq: Float = 0
+                        vDSP_svesq(s0, 1, &sumsq, vDSP_Length(s0.count))
+                        rmsAccum += Double(sumsq)
+                        sampleCount += s0.count
+                    }
                     dbgRxCount = rxCount
                     dbgRx0Samples += s0.count
                     if rxCount > 1 { dbgRx1Samples += result.receivers[1].count }
                 }
             }
+            let procMs = Double(DispatchTime.now().uptimeNanoseconds &- tProc0) / 1e6
+            if procMs > dbgMaxProcMs { dbgMaxProcMs = procMs }
 
-            // Send one EP2 for every EP6 cycle so the radio's TX FIFO stays fed at the
-            // full sample rate — otherwise the transmit carrier pulses instead of being steady.
-            var sendSettings = settingsSnapshot
-            sendSettings.mox = transmitting
-            sendSettings.drive = transmitting ? transmit.drive : 0
-            let slots = sendSettings.commandSlotCount
-
-            let ep2: [UInt8]
-            if transmitting && tuning {
-                // Steady tune carrier: phase-continuous complex sinusoid.
-                let amp: Float = 0.6
-                for s in 0..<126 {
-                    tuneFrame[s * 2] = amp * Float(cos(tunePhase))
-                    tuneFrame[s * 2 + 1] = amp * Float(sin(tunePhase))
-                    tunePhase += tuneDelta
-                    if tunePhase > 2 * Double.pi { tunePhase -= 2 * Double.pi }
+            // EP2 pacing: the radio consumes EP2 at the fixed 48 kHz TX/C&C clock
+            // (~381 frames/s) regardless of the RX rate. Pace by the WALL CLOCK, not
+            // by counting received packets: when the radio's actual stream rate
+            // disagrees with `settings` (e.g. stale 192 kHz config held from a prior
+            // session while the app assumes 48 kHz), packet-counted pacing overfeeds
+            // 4×, the flooded FIFO stops honoring C&C, and the radio can never
+            // converge to the requested config — observed live as garbled ring-
+            // shredded audio plus dead tuning. Clock-paced EP2 always lands at the
+            // rate the radio can absorb, so the config latches within ~a second.
+            let nowNs = DispatchTime.now().uptimeNanoseconds
+            if nowNs >= nextEP2SendNs {
+                // Advance by exact frame periods to hold 381/s long-term; after a
+                // stall (recv timeout, dsp-command burst) resync instead of bursting
+                // a catch-up flood.
+                nextEP2SendNs &+= Self.ep2PeriodNs
+                if nowNs > nextEP2SendNs &+ 4 &* Self.ep2PeriodNs {
+                    nextEP2SendNs = nowNs &+ Self.ep2PeriodNs
                 }
-                ep2 = HPSDRFrame.buildEP2(sequence: seqOut, settings: sendSettings,
-                                          slot1: slotCounter % slots, slot2: (slotCounter + 1) % slots,
-                                          txIQ: tuneFrame)
-            } else if transmitting {
-                // Voice transmit: feed microphone audio through WDSP TXA. Guard the
-                // refill on `running` and on an empty block so a teardown that closes
-                // the TXA channel mid-transmit can't spin this loop forever.
-                while running.get(), txBuffer.count - txPos < 252 {
-                    var mic = txSilence
-                    _ = mic.withUnsafeMutableBufferPointer {
-                        micRing.read(into: $0.baseAddress!, count: WDSPTransmit.bufferSize)
+                ep2SentInInterval += 1
+                var sendSettings = settingsSnapshot
+                sendSettings.mox = transmitting
+                sendSettings.drive = transmitting ? transmit.drive : 0
+                let slots = sendSettings.commandSlotCount
+
+                if transmitting && tuning {
+                    // Steady tune carrier: phase-continuous complex sinusoid.
+                    let amp: Float = 0.6
+                    for s in 0..<126 {
+                        tuneFrame[s * 2] = amp * Float(cos(tunePhase))
+                        tuneFrame[s * 2 + 1] = amp * Float(sin(tunePhase))
+                        tunePhase += tuneDelta
+                        if tunePhase > 2 * Double.pi { tunePhase -= 2 * Double.pi }
                     }
-                    let block = wdspTx.processBlock(mic: mic)
-                    if block.isEmpty { break }
-                    txBuffer.append(contentsOf: block)
-                }
-                let frameIQ: [Float]
-                if txBuffer.count - txPos >= 252 {
-                    frameIQ = Array(txBuffer[txPos ..< txPos + 252])
-                    txPos += 252
-                    if txPos > 8192 { txBuffer.removeFirst(txPos); txPos = 0 }
+                    HPSDRFrame.buildEP2(into: &ep2Frame, sequence: seqOut, settings: sendSettings,
+                                        slot1: slotCounter % slots, slot2: (slotCounter + 1) % slots,
+                                        txIQ: tuneFrame)
+                } else if transmitting {
+                    // Voice transmit: feed microphone audio through WDSP TXA. Guard the
+                    // refill on `running` and on an empty block so a teardown that closes
+                    // the TXA channel mid-transmit can't spin this loop forever.
+                    while running.get(), txBuffer.count - txPos < 252 {
+                        var mic = txSilence
+                        _ = mic.withUnsafeMutableBufferPointer {
+                            micRing.read(into: $0.baseAddress!, count: WDSPTransmit.bufferSize)
+                        }
+                        let block = wdspTx.processBlock(mic: mic)
+                        if block.isEmpty { break }
+                        txBuffer.append(contentsOf: block)
+                    }
+                    if txBuffer.count - txPos >= 252 {
+                        frameIQ.withUnsafeMutableBufferPointer { dst in
+                            txBuffer.withUnsafeBufferPointer { src in
+                                dst.baseAddress!.update(from: src.baseAddress! + txPos, count: 252)
+                            }
+                        }
+                        txPos += 252
+                        if txPos > 8192 { txBuffer.removeFirst(txPos); txPos = 0 }
+                    } else {
+                        // Channel closed during teardown: send a silent frame, never slice past the end.
+                        frameIQ.withUnsafeMutableBufferPointer {
+                            vDSP_vclr($0.baseAddress!, 1, vDSP_Length($0.count))
+                        }
+                    }
+                    HPSDRFrame.buildEP2(into: &ep2Frame, sequence: seqOut, settings: sendSettings,
+                                        slot1: slotCounter % slots, slot2: (slotCounter + 1) % slots,
+                                        txIQ: frameIQ)
                 } else {
-                    // Channel closed during teardown: send a silent frame, never slice past the end.
-                    frameIQ = [Float](repeating: 0, count: 252)
+                    if txPos != 0 || !txBuffer.isEmpty { txBuffer.removeAll(keepingCapacity: true); txPos = 0 }
+                    HPSDRFrame.buildEP2(into: &ep2Frame, sequence: seqOut, settings: sendSettings,
+                                        slot1: slotCounter % slots, slot2: (slotCounter + 1) % slots)
                 }
-                ep2 = HPSDRFrame.buildEP2(sequence: seqOut, settings: sendSettings,
-                                          slot1: slotCounter % slots, slot2: (slotCounter + 1) % slots,
-                                          txIQ: frameIQ)
-            } else {
-                if txPos != 0 || !txBuffer.isEmpty { txBuffer.removeAll(keepingCapacity: true); txPos = 0 }
-                ep2 = HPSDRFrame.buildEP2(sequence: seqOut, settings: sendSettings,
-                                          slot1: slotCounter % slots, slot2: (slotCounter + 1) % slots)
+                slotCounter += 2
+                seqOut &+= 1
+                _ = ep2Frame.withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) }
             }
-            slotCounter += 2
-            seqOut &+= 1
-            _ = ep2.withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) }
 
             // Flush a throttled update roughly every 100 ms.
             let elapsed = Date().timeIntervalSince(intervalStart)
@@ -682,12 +858,41 @@ actor RadioConnection {
                                             signalRMS: rms))
                 dbgFlushCount += 1
                 dbgGaps += gapsInInterval
+                dbgEP2Sent += ep2SentInInterval
+                ep2SentInInterval = 0
                 if dbgFlushCount >= 10 {   // ~1×/sec
-                    NSLog("DSP: rxCount=\(dbgRxCount) packetRate=\(pps)/s gaps=\(dbgGaps)/s rx0decoded=\(dbgRx0Samples)/s rx1decoded=\(dbgRx1Samples)/s recv=\(dbgReceived) hdr=[\(dbgHdr)] sync=[\(dbgSync)]")
+                    // Header/sync diagnostics on the most recent datagram — computed
+                    // only here (1×/sec), never in the per-packet path.
+                    var hdr = "?"
+                    var sync = "NONE"
+                    if dbgReceived > 522 {
+                        hdr = String(format: "%02X %02X %02X %02X",
+                                     buffer[0], buffer[1], buffer[2], buffer[3])
+                        // Scan for the 7F 7F 7F USB sync word and report every offset
+                        // (should be 8 and 520 in a standard frame).
+                        var offsets: [Int] = []
+                        var i = 0
+                        let limit = dbgReceived - 2
+                        while i < limit {
+                            if buffer[i] == 0x7F && buffer[i + 1] == 0x7F && buffer[i + 2] == 0x7F {
+                                offsets.append(i)
+                                if offsets.count >= 6 { break }
+                            }
+                            i += 1
+                        }
+                        if !offsets.isEmpty { sync = offsets.map(String.init).joined(separator: ",") }
+                    }
+                    let drainStr = String(format: "%.1f", dbgMaxDrainMs)
+                    let procStr = String(format: "%.1f", dbgMaxProcMs)
+                    NSLog("DSP: rxCount=\(dbgRxCount) packetRate=\(pps)/s gaps=\(dbgGaps)/s ep2=\(dbgEP2Sent)/s rx0decoded=\(dbgRx0Samples)/s rx1decoded=\(dbgRx1Samples)/s cmds=\(dbgCmdCount)/s maxDrain=\(drainStr)ms maxProc=\(procStr)ms resyncs=\(assembler.resyncs) recv=\(dbgReceived) hdr=[\(hdr)] sync=[\(sync)]")
                     dbgFlushCount = 0
                     dbgGaps = 0
+                    dbgEP2Sent = 0
                     dbgRx0Samples = 0
                     dbgRx1Samples = 0
+                    dbgCmdCount = 0
+                    dbgMaxDrainMs = 0
+                    dbgMaxProcMs = 0
                 }
                 intervalStart = Date()
                 packetsInInterval = 0
@@ -696,26 +901,52 @@ actor RadioConnection {
                 sampleCount = 0
             }
         }
+
+        // Teardown on this thread: it is the sole owner of the socket, and the WDSP
+        // channels must close here so the close can never race an in-flight fexchange0.
+        let finalFD = socket.current
+        if finalFD >= 0 {
+            let stopPacket = HPSDRProtocol1.stopCommand()
+            _ = stopPacket.withUnsafeBytes { send(finalFD, $0.baseAddress, $0.count, 0) }
+            close(finalFD)
+        }
+        socket.current = -1
+        for engine in engines { engine.wdsp.close() }
+        wdspTx.close()
     }
 }
 
 /// A thread-safe FIFO of WDSP operations queued by the actor and executed on the DSP
 /// thread. Ensures all WDSP calls are serialized (WDSP is not thread-safe on macOS).
 private nonisolated final class DSPCommandQueue: @unchecked Sendable {
-    private var lock = os_unfair_lock()
-    private var commands: [@Sendable () -> Void] = []
+    private struct Entry {
+        let key: String?
+        let run: @Sendable () -> Void
+    }
 
-    func enqueue(_ command: @escaping @Sendable () -> Void) {
+    private var lock = os_unfair_lock()
+    private var commands: [Entry] = []
+
+    /// Enqueues a command. A non-nil `key` coalesces: if a command with the same key
+    /// is already pending, it is REPLACED in place (keeping queue order) instead of
+    /// appended — a slider drag collapses to one pending command carrying the latest
+    /// value, rather than hundreds executed back-to-back on the DSP thread.
+    func enqueue(key: String? = nil, _ command: @escaping @Sendable () -> Void) {
         os_unfair_lock_lock(&lock)
-        commands.append(command)
+        if let key, let existing = commands.firstIndex(where: { $0.key == key }) {
+            commands[existing] = Entry(key: key, run: command)
+        } else {
+            commands.append(Entry(key: key, run: command))
+        }
         os_unfair_lock_unlock(&lock)
     }
 
-    /// Atomically removes and returns all queued commands.
-    func drain() -> [@Sendable () -> Void] {
+    /// Atomically removes and returns all queued commands with their coalescing
+    /// keys (the run loop logs the key of any command that runs slow).
+    func drain() -> [(key: String?, run: @Sendable () -> Void)] {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
-        let pending = commands
+        let pending = commands.map { (key: $0.key, run: $0.run) }
         commands.removeAll(keepingCapacity: true)
         return pending
     }
