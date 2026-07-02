@@ -42,6 +42,9 @@ struct RadioDetailView: View {
                     Section("Noise Reduction") {
                         NoiseReductionSectionView(session: session)
                     }
+                    Section("Squelch") {
+                        SquelchSectionView(session: session)
+                    }
                     Section("RX Equalizer") {
                         RXEqualizerSectionView(session: session)
                     }

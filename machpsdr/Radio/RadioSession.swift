@@ -32,6 +32,9 @@ final class RadioSession {
     var noiseBlanker2 = false           // NOB
     var noiseBlanker2Mode = 0           // 0 zero, 1 sample-hold, 2 mean-hold, 3 hold-sample, 4 interpolate
     var noiseBlanker2Threshold = 3.0
+    // Squelch (AM/SAM via AMSQ, FM via FMSQ; SSB/CW have no squelch in this WDSP build)
+    var squelch = false
+    var squelchLevel = 50.0             // 0…100 UI scale
     // AGC + front-end gain
     var agcMode = 3                     // 0 off, 1 long, 2 slow, 3 medium, 4 fast
     var agcThreshold = 90.0             // AGC-T (max gain, dB)
@@ -310,6 +313,18 @@ final class RadioSession {
         Task { await conn?.setNoiseBlanker2Threshold(threshold) }
     }
 
+    func setSquelch(_ on: Bool) {
+        squelch = on
+        let conn = connection
+        Task { await conn?.setSquelch(on) }
+    }
+
+    func setSquelchLevel(_ level: Double) {
+        squelchLevel = level
+        let conn = connection
+        Task { await conn?.setSquelchLevel(level) }
+    }
+
     func setAGCMode(_ mode: Int) {
         agcMode = mode
         let conn = connection
@@ -570,6 +585,8 @@ final class RadioSession {
         let nb2 = noiseBlanker2
         let nb2Mode = noiseBlanker2Mode
         let nb2Thresh = noiseBlanker2Threshold
+        let sql = squelch
+        let sqlLevel = squelchLevel
         let agc = agcMode
         let agcT = agcThreshold
         let atten = rxAttenuator
@@ -609,6 +626,8 @@ final class RadioSession {
             await conn?.setNoiseBlanker2Mode(nb2Mode)
             await conn?.setNoiseBlanker2Threshold(nb2Thresh)
             await conn?.setNoiseBlanker2(nb2)
+            await conn?.setSquelchLevel(sqlLevel)
+            await conn?.setSquelch(sql)
             await conn?.setAGCMode(agc)
             await conn?.setAGCTop(agcT)
             await conn?.setRXAttenuator(UInt8(atten))

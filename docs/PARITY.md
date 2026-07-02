@@ -20,9 +20,11 @@ Legend: ✅ implemented in machpsdr · ⬜ to do · ➖ not applicable to the AN
 - ⬜ SNB spectral noise blanker `[WDSP: snba/bpsnba]`
 - ✅ AGC modes + AGC-T; ⬜ Custom mode (slope/attack/decay/hang), on-panadapter AGC lines
 - ✅ Variable filters (width / low-high per mode); ⬜ Var1/Var2 memories, drag filter edges
-- ⬜ APF CW peaking filter (gain/tune/BW; Bi-Quad/Double-Pole/Matched/Gaussian) `[WDSP]`
-- ⬜ MNF manual notch filters (persistent, frequency-tracking) `[WDSP + persistence]`
-- ⬜ Squelch — level squelch (AM/FM) + SSQL voice squelch (SSB) `[WDSP: amsq/ssql]`
+- ⬜ APF CW peaking filter (gain/tune/BW; Bi-Quad/Double-Pole/Matched/Gaussian) — NOT
+  in the vendored WDSP build (no SetRXAAPF/SPEAK symbols); needs WDSP source addition
+- ⬜ MNF manual notch filters (persistent, frequency-tracking) `[WDSP: RXANBPAddNotch/…]`
+- ✅ Squelch — AM/SAM level squelch (AMSQ) + FM squelch (FMSQ), mode-aware, with a
+  0–100 level; ⬜ SSB voice squelch (SSQL is not in the vendored WDSP build)
 - ✅ RX EQ (3-band); ⬜ parametric 5/10/18-band with Q
 - ➖ Diversity reception (10E has a single ADC)
 - ⬜ Binaural (BIN) rendering `[WDSP]`

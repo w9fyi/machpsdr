@@ -403,6 +403,10 @@ actor RadioConnection {
     func setNoiseBlanker2Mode(_ mode: Int, slice: Int = 0) { runOnSlice(slice) { $0.setNoiseBlanker2Mode(mode) } }
     func setNoiseBlanker2Threshold(_ threshold: Double, slice: Int = 0) { runOnSlice(slice) { $0.setNoiseBlanker2Threshold(threshold) } }
 
+    /// Squelch (AM/SAM level squelch via AMSQ, FM via FMSQ), per slice.
+    func setSquelch(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setSquelch(on) } }
+    func setSquelchLevel(_ level: Double, slice: Int = 0) { runOnSlice(slice) { $0.setSquelchLevel(level) } }
+
     /// Tunes receiver `index` to `hz`. Applied on the next outgoing EP2 frame.
     func setFrequency(_ hz: UInt32, receiver index: Int = 0) {
         var s = settingsBox.current

@@ -143,6 +143,11 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private var rxEqOn = false
     private var rxEqGains: [Int32] = [0, 0, 0, 0]   // [preamp, low, mid, high] in dB
 
+    // Squelch: AM/SAM use AMSQ (amplitude squelch), FM uses FMSQ. SSB voice squelch
+    // (SSQL) is not present in this vendored WDSP build.
+    private var squelchOn = false
+    private var squelchLevel: Double = 50    // 0…100 UI scale
+
     init(ring: AudioRingBuffer, channelID: Int32 = 0, nbID: Int32 = 0) {
         self.ring = ring
         self.channelID = channelID
@@ -320,7 +325,6 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         rxEqOn = on
         if isOpen { SetRXAEQRun(channelID, on ? 1 : 0) }
     }
-
     /// Sets RX EQ gains in dB: overall preamp plus low/mid/high bands.
     func setEQGains(preamp: Int, low: Int, mid: Int, high: Int) {
         rxEqGains = [Int32(preamp), Int32(low), Int32(mid), Int32(high)]
@@ -331,6 +335,32 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private func applyEQ() {
         SetRXAGrphEQ(channelID, &rxEqGains)
         SetRXAEQRun(channelID, rxEqOn ? 1 : 0)
+    }
+
+    /// Squelch: silences audio below a threshold. AM/SAM use WDSP AMSQ (amplitude
+    /// squelch); FM uses FMSQ. (SSB voice squelch / SSQL is not in this WDSP build.)
+    func setSquelch(_ on: Bool) {
+        squelchOn = on
+        if isOpen { applySquelch() }
+    }
+
+    /// Squelch opening level on a 0…100 scale (higher = more signal required to open).
+    func setSquelchLevel(_ level: Double) {
+        squelchLevel = max(0, min(100, level))
+        if isOpen { applySquelch() }
+    }
+
+    /// Applies squelch to whichever subsystem the current mode uses. Called from
+    /// `applyMode` so a mode change re-targets the right squelch (AMSQ vs FMSQ).
+    private func applySquelch() {
+        // Map the 0…100 level to each subsystem's native threshold. AMSQ is in dB
+        // (roughly −160…0); FMSQ is 0…1. Calibration is approximate — tune on air.
+        SetRXAAMSQThreshold(channelID, squelchLevel / 100.0 * 160.0 - 160.0)
+        SetRXAFMSQThreshold(channelID, squelchLevel / 100.0)
+        let amActive = squelchOn && (mode == .am || mode == .sam)
+        let fmActive = squelchOn && mode == .fm
+        SetRXAAMSQRun(channelID, amActive ? 1 : 0)
+        SetRXAFMSQRun(channelID, fmActive ? 1 : 0)
     }
 
     /// Re-applies blanker state after the EXT instances are (re)created on open.
@@ -364,6 +394,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         } else {
             SetRXAShiftRun(channelID, 0)
         }
+        applySquelch()   // AMSQ vs FMSQ depends on the active mode
     }
 
     /// Feeds interleaved Float I/Q at `inputRate`; decimates to 48 kHz and runs WDSP a
