@@ -1,4 +1,5 @@
 import Foundation
+import Accelerate
 import CWDSP
 
 /// Demodulation modes supported by the WDSP receiver, with their WDSP RXA codes.
@@ -112,6 +113,13 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private var outBuffer: [Double]
     private var fill = 0
     private var audioScratch: [Float]
+    // Partial boxcar-decimation group carried across process() calls. Packets don't
+    // arrive in multiples of the decimation factor (126 complex samples at 192/384 kHz),
+    // so the tail of one packet must combine with the head of the next — discarding it
+    // drops ~1.6% of the stream and buzzes at the packet rate.
+    private var decSumI: Float = 0
+    private var decSumQ: Float = 0
+    private var decFill = 0
 
     private var volume: Double = 0.4
     private var agcMode: Int32 = 3       // 0 off, 1 long, 2 slow, 3 medium, 4 fast
@@ -480,40 +488,40 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         guard isOpen else { return }
         let decimation = max(1, inputRate / Self.audioRate)
         let complexCount = iq.count / 2
-        var index = 0
-        while index + decimation <= complexCount {
-            var sumI: Float = 0
-            var sumQ: Float = 0
-            for _ in 0..<decimation {
-                sumI += iq[index * 2]
-                sumQ += iq[index * 2 + 1]
-                index += 1
-            }
-            let scale = 1.0 / Double(decimation)
-            // The ANAN's I/Q matches WDSP's convention directly — feed unmodified.
-            inBuffer[fill * 2] = Double(sumI) * scale
-            inBuffer[fill * 2 + 1] = Double(sumQ) * scale
-            fill += 1
+        let scale = 1.0 / Double(decimation)
+        iq.withUnsafeBufferPointer { p in
+            for index in 0..<complexCount {
+                decSumI += p[index * 2]
+                decSumQ += p[index * 2 + 1]
+                decFill += 1
+                guard decFill >= decimation else { continue }
+                // The ANAN's I/Q matches WDSP's convention directly — feed unmodified.
+                inBuffer[fill * 2] = Double(decSumI) * scale
+                inBuffer[fill * 2 + 1] = Double(decSumQ) * scale
+                decSumI = 0
+                decSumQ = 0
+                decFill = 0
+                fill += 1
 
-            if fill == Self.bufferSize {
-                // Front-end impulse/static blanking on the complex I/Q (in place).
-                if nbOn {
-                    inBuffer.withUnsafeMutableBufferPointer { p in
-                        xanbEXT(nbID, p.baseAddress, p.baseAddress)
+                if fill == Self.bufferSize {
+                    // Front-end impulse/static blanking on the complex I/Q (in place).
+                    if nbOn {
+                        inBuffer.withUnsafeMutableBufferPointer { b in
+                            xanbEXT(nbID, b.baseAddress, b.baseAddress)
+                        }
                     }
-                }
-                if nb2On {
-                    inBuffer.withUnsafeMutableBufferPointer { p in
-                        xnobEXT(nbID, p.baseAddress, p.baseAddress)
+                    if nb2On {
+                        inBuffer.withUnsafeMutableBufferPointer { b in
+                            xnobEXT(nbID, b.baseAddress, b.baseAddress)
+                        }
                     }
+                    var error: Int32 = 0
+                    fexchange0(channelID, &inBuffer, &outBuffer, &error)
+                    // WDSP output is interleaved stereo; take the left lane (mono path).
+                    vDSP_vdpsp(outBuffer, 2, &audioScratch, 1, vDSP_Length(Self.bufferSize))
+                    ring.write(audioScratch)
+                    fill = 0
                 }
-                var error: Int32 = 0
-                fexchange0(channelID, &inBuffer, &outBuffer, &error)
-                for k in 0..<Self.bufferSize {
-                    audioScratch[k] = Float(outBuffer[k * 2])
-                }
-                ring.write(audioScratch)
-                fill = 0
             }
         }
     }

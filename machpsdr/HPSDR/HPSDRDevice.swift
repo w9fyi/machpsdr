@@ -53,7 +53,9 @@ nonisolated enum RadioStatus: Equatable, Hashable {
 
 /// A radio found on the local network via openHPSDR Protocol 1 discovery.
 nonisolated struct DiscoveredRadio: Identifiable, Hashable {
-    let id = UUID()
+    /// Stable identity across rescans (a fresh UUID per scan made SwiftUI treat every
+    /// rediscovered radio as a new list row).
+    var id: String { macAddress }
     let ipAddress: String
     let macAddress: String
     let board: HPSDRBoard

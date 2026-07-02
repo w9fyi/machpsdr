@@ -10,6 +10,16 @@
 		7F8CA0AF2FF3228D003092CB /* CWDSP in Frameworks */ = {isa = PBXBuildFile; productRef = 7F8CA0AE2FF3228D003092CB /* CWDSP */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		000000000000000200000002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 000000000000000000000000 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 000000000000000100000000;
+			remoteInfo = machpsdr;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		000000000000000000000120 /* machpsdr.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = machpsdr.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		000000000000000000000121 /* machpsdrTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = machpsdrTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -102,8 +112,6 @@
 				000000000000000000000011 /* machpsdrTests */,
 			);
 			name = machpsdrTests;
-			packageProductDependencies = (
-			);
 			productName = machpsdrTests;
 			productReference = 000000000000000000000121 /* machpsdrTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
@@ -175,16 +183,6 @@
 			);
 		};
 /* End PBXSourcesBuildPhase section */
-
-/* Begin PBXContainerItemProxy section */
-		000000000000000200000002 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 000000000000000000000000 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 000000000000000100000000;
-			remoteInfo = machpsdr;
-		};
-/* End PBXContainerItemProxy section */
 
 /* Begin PBXTargetDependency section */
 		000000000000000200000001 /* PBXTargetDependency */ = {

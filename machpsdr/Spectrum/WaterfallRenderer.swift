@@ -1,61 +1,75 @@
 import Foundation
 import CoreGraphics
 
-/// Maintains a scrolling waterfall bitmap. Each pushed spectrum becomes the new
-/// top row; older rows scroll downward. dB values map through a color gradient.
+/// Maintains a scrolling waterfall bitmap as a circular row buffer: each push writes
+/// only the ONE new row (the old memmove scrolled the entire ~700 KB bitmap per frame)
+/// and `topRow` marks where the newest row lives. The view restores display order by
+/// drawing the image as two stacked slices. A persistent CGContext backs the pixel
+/// memory, so `makeImage()` is the single per-frame copy.
 ///
 /// CPU-based for simplicity and low risk; can be moved to Metal later if needed.
 nonisolated final class WaterfallRenderer {
     let width: Int
     let height: Int
-    private var pixels: [UInt32]            // 0xFFRRGGBB per pixel, row 0 = newest
+
+    /// One rendered waterfall frame. `image` rows are in storage order; display row
+    /// `r` (0 = newest) is storage row `(topRow + r) % height`.
+    struct Frame {
+        let image: CGImage
+        let topRow: Int
+    }
+
+    private let pixels: UnsafeMutablePointer<UInt32>   // 0xFFRRGGBB, circular by row
+    private var topRow = 0
     private let palette: [UInt32]           // 256-entry color map
-    private let colorSpace = CGColorSpaceCreateDeviceRGB()
-    private let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue
-        | CGImageAlphaInfo.noneSkipFirst.rawValue
+    private let context: CGContext?
 
     init(width: Int = 640, height: Int = 280) {
         self.width = width
         self.height = height
-        self.pixels = [UInt32](repeating: 0xFF00_0000, count: width * height)
+        self.pixels = .allocate(capacity: width * height)
+        self.pixels.initialize(repeating: 0xFF00_0000, count: width * height)
         self.palette = WaterfallRenderer.buildPalette()
+        self.context = CGContext(
+            data: pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue
+                | CGImageAlphaInfo.noneSkipFirst.rawValue
+        )
     }
 
-    /// Scrolls down one row, writes `data` (mapped through [minDb, maxDb]) as the
-    /// new top row, and returns a CGImage of the current waterfall.
-    func push(_ data: [Float], minDb: Float, maxDb: Float) -> CGImage? {
-        guard !data.isEmpty else { return makeImage() }
+    deinit {
+        pixels.deallocate()
+    }
+
+    /// Writes `data` (mapped through [minDb, maxDb]) as the new top row and returns
+    /// the current waterfall frame.
+    func push(_ data: [Float], minDb: Float, maxDb: Float) -> Frame? {
+        guard !data.isEmpty else { return makeFrame() }
         let range = max(maxDb - minDb, 0.0001)
 
-        pixels.withUnsafeMutableBufferPointer { buffer in
-            guard let base = buffer.baseAddress else { return }
-            // Scroll existing rows down by one.
-            memmove(base + width, base, (height - 1) * width * MemoryLayout<UInt32>.size)
-            // Write the new top row, resampling the spectrum to the pixel width.
+        topRow = (topRow + height - 1) % height
+        let row = pixels + topRow * width
+        data.withUnsafeBufferPointer { src in
+            // Resample the spectrum to the pixel width through the palette.
             for x in 0..<width {
                 let srcIndex = data.count == width
                     ? x
                     : min(data.count - 1, Int(Float(x) / Float(width) * Float(data.count)))
-                let normalized = max(0, min(1, (data[srcIndex] - minDb) / range))
-                base[x] = palette[Int(normalized * 255)]
+                let normalized = max(0, min(1, (src[srcIndex] - minDb) / range))
+                row[x] = palette[Int(normalized * 255)]
             }
         }
-        return makeImage()
+        return makeFrame()
     }
 
-    private func makeImage() -> CGImage? {
-        pixels.withUnsafeMutableBytes { raw -> CGImage? in
-            guard let context = CGContext(
-                data: raw.baseAddress,
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bytesPerRow: width * 4,
-                space: colorSpace,
-                bitmapInfo: bitmapInfo
-            ) else { return nil }
-            return context.makeImage()
-        }
+    private func makeFrame() -> Frame? {
+        guard let image = context?.makeImage() else { return nil }
+        return Frame(image: image, topRow: topRow)
     }
 
     /// Classic SDR waterfall gradient: black → blue → cyan → green → yellow → red → white.

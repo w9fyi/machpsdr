@@ -8,21 +8,25 @@ nonisolated final class SpectrumBuffer: @unchecked Sendable {
     private var data: [Float] = []
     private var center: UInt32 = 0
     private var span: Int = 0
+    private var generation: UInt64 = 0
 
     func update(_ newData: [Float], centerHz: UInt32, spanHz: Int) {
         os_unfair_lock_lock(&lock)
         data = newData
         center = centerHz
         span = spanHz
+        generation &+= 1
         os_unfair_lock_unlock(&lock)
     }
 
     /// Latest spectrum in display order (low → high frequency), or nil if none yet.
     /// `centerHz` is the frequency at the middle bin; `spanHz` is the total width.
-    func latest() -> (data: [Float], centerHz: UInt32, spanHz: Int)? {
+    /// `generation` increments on every update — pollers compare it to skip frames
+    /// that haven't changed instead of redrawing identical data.
+    func latest() -> (data: [Float], centerHz: UInt32, spanHz: Int, generation: UInt64)? {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
-        return data.isEmpty ? nil : (data, center, span)
+        return data.isEmpty ? nil : (data, center, span, generation)
     }
 }
 
@@ -110,16 +114,25 @@ nonisolated final class SpectrumAnalyzer: @unchecked Sendable {
         vDSP_vsq(outI, 1, &p2, 1, n)
         vDSP_vadd(p1, 1, p2, 1, &power, 1, n)
 
-        // Convert to dB, fftshift to display order, and exponentially average.
+        // Convert to dB, fftshift to display order, and exponentially average —
+        // all vectorized (a scalar log10f per bin dominated this function).
         let half = fftSize / 2
-        let normScale: Float = 1.0 / Float(fftSize * fftSize)
-        let alpha = averaging
-        for j in 0..<fftSize {
-            let src = (j + half) % fftSize           // shift DC to center
-            let value = power[src] * normScale + 1e-12
-            let db = 10 * log10f(value)
-            averaged[j] = averaged[j] * alpha + db * (1 - alpha)
+        var normScale: Float = 1.0 / Float(fftSize * fftSize)
+        var floorValue: Float = 1e-12
+        vDSP_vsmsa(power, 1, &normScale, &floorValue, &p1, 1, n)   // p1 = power*scale + floor
+        var reference: Float = 1
+        vDSP_vdbcon(p1, 1, &reference, &p1, 1, n, 0)               // p1 = 10·log10(p1)
+        // fftshift (DC to center): display[0..<half] = p1[half...], display[half...] = p1[0..<half].
+        p1.withUnsafeBufferPointer { src in
+            p2.withUnsafeMutableBufferPointer { dst in
+                dst.baseAddress!.update(from: src.baseAddress! + half, count: half)
+                (dst.baseAddress! + half).update(from: src.baseAddress!, count: half)
+            }
         }
+        var alpha = averaging
+        var beta = 1 - averaging
+        vDSP_vsmul(averaged, 1, &alpha, &averaged, 1, n)           // averaged *= alpha
+        vDSP_vsma(p2, 1, &beta, averaged, 1, &averaged, 1, n)      // averaged += shifted*(1-alpha)
         buffer.update(averaged, centerHz: centerHz, spanHz: spanHz)
     }
 }

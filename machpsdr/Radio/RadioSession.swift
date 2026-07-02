@@ -102,7 +102,7 @@ final class RadioSession {
     /// Total active receivers, including the main one.
     var activeSliceCount: Int { extraSlices.count + 1 }
     /// Indices (0…activeSliceCount-1) for iterating panadapters.
-    var sliceIndices: [Int] { Array(0..<activeSliceCount) }
+    var sliceIndices: Range<Int> { 0..<activeSliceCount }
 
     let midi = MIDIManager()
     let bandData = BandDataStore()

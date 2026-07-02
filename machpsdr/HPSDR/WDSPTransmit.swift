@@ -1,4 +1,5 @@
 import Foundation
+import Accelerate
 import CWDSP
 
 /// Wraps a WDSP TXA transmit channel: turns microphone audio (or a built-in tune
@@ -205,16 +206,22 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
     /// into interleaved TX I/Q Floats. Returns an empty array if not open.
     func processBlock(mic: [Float]) -> [Float] {
         guard isOpen else { return [] }
-        for k in 0..<Self.bufferSize {
-            let sample = k < mic.count ? Double(mic[k]) * micGain : 0
-            inBuffer[k * 2] = sample
-            inBuffer[k * 2 + 1] = 0
+        // Real lane (stride 2) gets the mic with gain; the imaginary lane is zeroed at
+        // init and never written, so it stays zero.
+        let n = min(mic.count, Self.bufferSize)
+        var gain = micGain
+        if n > 0 {
+            vDSP_vspdp(mic, 1, &inBuffer, 2, vDSP_Length(n))
+            vDSP_vsmulD(inBuffer, 2, &gain, &inBuffer, 2, vDSP_Length(n))
+        }
+        if n < Self.bufferSize {
+            inBuffer.withUnsafeMutableBufferPointer { p in
+                vDSP_vclrD(p.baseAddress! + n * 2, 2, vDSP_Length(Self.bufferSize - n))
+            }
         }
         var error: Int32 = 0
         fexchange0(Self.channelID, &inBuffer, &outBuffer, &error)
-        for k in 0..<(Self.bufferSize * 2) {
-            iqScratch[k] = Float(outBuffer[k])
-        }
+        vDSP_vdpsp(outBuffer, 1, &iqScratch, 1, vDSP_Length(Self.bufferSize * 2))
         return iqScratch
     }
 

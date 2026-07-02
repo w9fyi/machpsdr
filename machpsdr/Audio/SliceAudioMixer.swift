@@ -1,4 +1,5 @@
 import Foundation
+import Accelerate
 import AVFoundation
 import AudioToolbox
 
@@ -30,10 +31,13 @@ nonisolated final class SliceAudioMixer: @unchecked Sendable {
     private var panR: [Float]
     private var enabled: [Bool]
 
-    // Diagnostics: frames rendered and real (non-silence) samples pulled per slice,
-    // logged ~1×/sec. real << 48000/s for an enabled slice means the ring is underrunning.
+    // Diagnostics: frames rendered and real (non-silence) samples pulled per slice.
+    // The render callback only bumps these counters; a 1 Hz timer formats and logs
+    // them (string building / NSLog must never run on the render thread).
+    // real << 48000/s for an enabled slice means the ring is underrunning.
     private var dbgFrames = 0
     private var dbgReal: [Int]
+    private var dbgTimer: DispatchSourceTimer?
 
     init(deviceUID: String? = nil) {
         self.deviceUID = deviceUID
@@ -111,10 +115,33 @@ nonisolated final class SliceAudioMixer: @unchecked Sendable {
         }
         engine.prepare()
         try engine.start()
+
+        // 1 Hz diagnostics logger, off the render thread.
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler { [weak self] in self?.logDiagnostics() }
+        timer.resume()
+        dbgTimer = timer
     }
 
     func stop() {
+        dbgTimer?.cancel()
+        dbgTimer = nil
         engine.stop()
+    }
+
+    /// Reads and resets the render counters, then logs them (runs on a utility queue).
+    private func logDiagnostics() {
+        os_unfair_lock_lock(&lock)
+        let frames = dbgFrames
+        let real = dbgReal
+        let active = enabled
+        dbgFrames = 0
+        for idx in 0..<Self.capacity { dbgReal[idx] = 0 }
+        os_unfair_lock_unlock(&lock)
+        guard frames > 0 else { return }
+        let parts = (0..<Self.capacity).filter { active[$0] }.map { "s\($0)=\(real[$0])" }
+        NSLog("MIX: rendered=\(frames)f realSamples/s [\(parts.joined(separator: " "))]")
     }
 
     deinit {
@@ -135,42 +162,31 @@ nonisolated final class SliceAudioMixer: @unchecked Sendable {
               let right = buffers[1].mData?.assumingMemoryBound(to: Float.self) else {
             for buffer in buffers {
                 if let d = buffer.mData?.assumingMemoryBound(to: Float.self) {
-                    for i in 0..<frames { d[i] = 0 }
+                    vDSP_vclr(d, 1, vDSP_Length(frames))
                 }
             }
             return noErr
         }
 
-        for i in 0..<frames { left[i] = 0; right[i] = 0 }
+        vDSP_vclr(left, 1, vDSP_Length(frames))
+        vDSP_vclr(right, 1, vDSP_Length(frames))
 
         os_unfair_lock_lock(&lock)
         for idx in 0..<Self.capacity {
             guard enabled[idx], let ring = rings[idx] else { continue }
             let real = ring.read(into: scratch, count: n)
             dbgReal[idx] += real
-            let pl = panL[idx], pr = panR[idx]
-            for i in 0..<n {
-                let s = scratch[i]
-                left[i] += s * pl
-                right[i] += s * pr
-            }
+            var pl = panL[idx], pr = panR[idx]
+            vDSP_vsma(scratch, 1, &pl, left, 1, left, 1, vDSP_Length(n))
+            vDSP_vsma(scratch, 1, &pr, right, 1, right, 1, vDSP_Length(n))
         }
         dbgFrames += n
-        var logLine: String?
-        if dbgFrames >= Int(Self.sampleRate) {   // ~1×/sec
-            let parts = (0..<Self.capacity).filter { enabled[$0] }.map { "s\($0)=\(dbgReal[$0])" }
-            logLine = "MIX: rendered=\(dbgFrames)f realSamples/s [\(parts.joined(separator: " "))]"
-            dbgFrames = 0
-            for idx in 0..<Self.capacity { dbgReal[idx] = 0 }
-        }
         os_unfair_lock_unlock(&lock)
-        if let logLine { NSLog(logLine) }
 
         // Guard against summed overflow when several loud slices overlap.
-        for i in 0..<frames {
-            left[i] = max(-1, min(1, left[i]))
-            right[i] = max(-1, min(1, right[i]))
-        }
+        var lo: Float = -1, hi: Float = 1
+        vDSP_vclip(left, 1, &lo, &hi, left, 1, vDSP_Length(frames))
+        vDSP_vclip(right, 1, &lo, &hi, right, 1, vDSP_Length(frames))
         return noErr
     }
 }

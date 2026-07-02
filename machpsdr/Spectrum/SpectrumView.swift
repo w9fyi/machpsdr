@@ -18,7 +18,7 @@ struct SpectrumView: View {
         var data: [Float]
         var centerHz: UInt32
         var spanHz: Int
-        var image: CGImage?
+        var waterfall: WaterfallRenderer.Frame?
     }
 
     var body: some View {
@@ -32,10 +32,10 @@ struct SpectrumView: View {
                                size: CGSize(width: size.width, height: panHeight),
                                data: snap.data)
 
-                if let image = snap.image {
-                    context.draw(Image(decorative: image, scale: 1),
-                                 in: CGRect(x: 0, y: panHeight,
-                                            width: size.width, height: size.height - panHeight))
+                if let frame = snap.waterfall {
+                    drawWaterfall(context, frame: frame,
+                                  in: CGRect(x: 0, y: panHeight,
+                                             width: size.width, height: size.height - panHeight))
                 }
 
                 // Center (tuned) marker.
@@ -59,14 +59,45 @@ struct SpectrumView: View {
             .overlay(alignment: .topLeading) { frequencyLabels }
         }
         .task {
-            // Poll the latest spectrum ~30×/sec, push to the waterfall, and refresh.
+            // Poll the latest spectrum ~30×/sec. The generation check skips frames
+            // where no new FFT arrived, so unchanged data is never re-rendered (and
+            // duplicate rows never distort the waterfall's time axis).
+            var lastGeneration: UInt64 = 0
             while !Task.isCancelled {
-                if let (data, center, span) = spectrum.latest() {
-                    let image = renderer.push(data, minDb: minDb, maxDb: maxDb)
-                    snapshot = Snapshot(data: data, centerHz: center, spanHz: span, image: image)
+                if let (data, center, span, generation) = spectrum.latest(),
+                   generation != lastGeneration {
+                    lastGeneration = generation
+                    let frame = renderer.push(data, minDb: minDb, maxDb: maxDb)
+                    snapshot = Snapshot(data: data, centerHz: center, spanHz: span, waterfall: frame)
                 }
                 try? await Task.sleep(for: .milliseconds(33))
             }
+        }
+    }
+
+    /// Draws a circular-buffer waterfall frame in display order: the rows from
+    /// `topRow` down are the newest (drawn on top), rows before `topRow` follow.
+    private func drawWaterfall(_ context: GraphicsContext, frame: WaterfallRenderer.Frame, in rect: CGRect) {
+        let h = frame.image.height
+        guard h > 0 else { return }
+        if frame.topRow == 0 {
+            context.draw(Image(decorative: frame.image, scale: 1), in: rect)
+            return
+        }
+        let width = frame.image.width
+        let newerRows = h - frame.topRow
+        let newerHeight = rect.height * CGFloat(newerRows) / CGFloat(h)
+        if let newer = frame.image.cropping(to: CGRect(x: 0, y: frame.topRow,
+                                                       width: width, height: newerRows)) {
+            context.draw(Image(decorative: newer, scale: 1),
+                         in: CGRect(x: rect.minX, y: rect.minY,
+                                    width: rect.width, height: newerHeight))
+        }
+        if let older = frame.image.cropping(to: CGRect(x: 0, y: 0,
+                                                       width: width, height: frame.topRow)) {
+            context.draw(Image(decorative: older, scale: 1),
+                         in: CGRect(x: rect.minX, y: rect.minY + newerHeight,
+                                    width: rect.width, height: rect.height - newerHeight))
         }
     }
 

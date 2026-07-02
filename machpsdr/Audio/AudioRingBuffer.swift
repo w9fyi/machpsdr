@@ -30,19 +30,35 @@ nonisolated final class AudioRingBuffer: @unchecked Sendable {
     }
 
     /// Producer: append `count` samples from a raw pointer. Allocation-free, so it
-    /// is safe to call directly from an audio tap/render callback.
+    /// is safe to call directly from an audio tap/render callback. Copies at most
+    /// two contiguous segments (memcpy) so the lock is held only briefly.
     func write(_ samples: UnsafePointer<Float>, count: Int) {
         guard count > 0 else { return }
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
-        for k in 0..<count {
-            storage[writeIndex] = samples[k]
-            writeIndex = (writeIndex + 1) % capacity
-            if available < capacity {
-                available += 1
+        storage.withUnsafeMutableBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            if count >= capacity {
+                // Larger than the ring: only the newest `capacity` samples survive.
+                base.update(from: samples + (count - capacity), count: capacity)
+                writeIndex = 0
+                readIndex = 0
+                available = capacity
+                return
+            }
+            let first = min(count, capacity - writeIndex)
+            (base + writeIndex).update(from: samples, count: first)
+            if count > first {
+                base.update(from: samples + first, count: count - first)
+            }
+            writeIndex += count
+            if writeIndex >= capacity { writeIndex -= capacity }
+            if available + count > capacity {
+                // Buffer full: the write overwrote the oldest samples.
+                readIndex = writeIndex
+                available = capacity
             } else {
-                // Buffer full: advance read index, dropping the oldest sample.
-                readIndex = (readIndex + 1) % capacity
+                available += count
             }
         }
     }
@@ -51,16 +67,25 @@ nonisolated final class AudioRingBuffer: @unchecked Sendable {
     /// shortfall. Returns the number of real (non-silence) samples provided.
     @discardableResult
     func read(into destination: UnsafeMutablePointer<Float>, count: Int) -> Int {
+        guard count > 0 else { return 0 }
         os_unfair_lock_lock(&lock)
-        defer { os_unfair_lock_unlock(&lock) }
         let real = min(count, available)
-        for i in 0..<real {
-            destination[i] = storage[readIndex]
-            readIndex = (readIndex + 1) % capacity
+        if real > 0 {
+            storage.withUnsafeBufferPointer { buf in
+                guard let base = buf.baseAddress else { return }
+                let first = min(real, capacity - readIndex)
+                destination.update(from: base + readIndex, count: first)
+                if real > first {
+                    (destination + first).update(from: base, count: real - first)
+                }
+            }
+            readIndex += real
+            if readIndex >= capacity { readIndex -= capacity }
+            available -= real
         }
-        available -= real
+        os_unfair_lock_unlock(&lock)
         if real < count {
-            for i in real..<count { destination[i] = 0 }
+            (destination + real).update(repeating: 0, count: count - real)
         }
         return real
     }
@@ -71,6 +96,26 @@ nonisolated final class AudioRingBuffer: @unchecked Sendable {
         readIndex = 0
         writeIndex = 0
         available = 0
+        os_unfair_lock_unlock(&lock)
+    }
+
+    /// Discards all buffered samples and refills with `count` samples of silence.
+    /// The producer and consumer run at the same nominal rate, so a ring left empty
+    /// never rebuilds slack: every consumer read races the next producer write and
+    /// scheduling jitter turns into audible dropouts until clock drift (a few
+    /// samples/second) slowly accumulates a cushion. Priming restores the cushion
+    /// instantly, trading `count` samples of latency for jitter immunity.
+    func reset(primingSilence count: Int) {
+        os_unfair_lock_lock(&lock)
+        let n = max(0, min(count, capacity))
+        if n > 0 {
+            storage.withUnsafeMutableBufferPointer { buf in
+                buf.baseAddress?.update(repeating: 0, count: n)
+            }
+        }
+        readIndex = 0
+        writeIndex = n == capacity ? 0 : n
+        available = n
         os_unfair_lock_unlock(&lock)
     }
 }
