@@ -97,9 +97,13 @@ nonisolated enum RadioMode: String, CaseIterable, Sendable, Identifiable {
 ///
 /// Runs on the network/DSP thread; `nonisolated` under MainActor-default isolation.
 nonisolated final class WDSPRadio: @unchecked Sendable {
-    static let channelID: Int32 = 0
     static let bufferSize = 1024
     static let audioRate = 48_000
+
+    /// WDSP RXA channel id for this slice (unique per receiver; TXA uses channel 1).
+    let channelID: Int32
+    /// WDSP external noise-blanker (ANB/NOB) table id for this slice (unique per receiver).
+    let nbID: Int32
 
     private let ring: AudioRingBuffer
     private var isOpen = false
@@ -128,8 +132,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private var anfOn = false
 
     // Front-end noise blankers (EXT): ANB (NB) and NOB (NB2). Run on the complex I/Q
-    // before demodulation. `nbID` indexes WDSP's external-blanker tables.
-    private let nbID: Int32 = 0
+    // before demodulation. `nbID` (set per slice in init) indexes WDSP's external-blanker tables.
     private var nbOn = false
     private var nbThreshold: Double = 3.0
     private var nb2On = false
@@ -140,8 +143,10 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private var rxEqOn = false
     private var rxEqGains: [Int32] = [0, 0, 0, 0]   // [preamp, low, mid, high] in dB
 
-    init(ring: AudioRingBuffer) {
+    init(ring: AudioRingBuffer, channelID: Int32 = 0, nbID: Int32 = 0) {
         self.ring = ring
+        self.channelID = channelID
+        self.nbID = nbID
         inBuffer = [Double](repeating: 0, count: WDSPRadio.bufferSize * 2)
         outBuffer = [Double](repeating: 0, count: WDSPRadio.bufferSize * 2)
         audioScratch = [Float](repeating: 0, count: WDSPRadio.bufferSize)
@@ -149,7 +154,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
 
     func open(mode: RadioMode) {
         guard !isOpen else { return }
-        OpenChannel(Self.channelID,
+        OpenChannel(channelID,
                     Int32(Self.bufferSize),
                     Int32(Self.bufferSize * 2),
                     Int32(Self.audioRate),
@@ -164,7 +169,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         create_nobEXT(nbID, 0, nb2Mode, Int32(Self.bufferSize), Double(Self.audioRate),
                       0.0001, 0.0001, 0.0001, 0.005, nb2Threshold)
         applyAGC()
-        SetRXAPanelGain1(Self.channelID, volume)
+        SetRXAPanelGain1(channelID, volume)
         self.mode = mode
         resetFilterDefaults()
         isOpen = true
@@ -172,13 +177,13 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         applyNoiseReduction()
         applyNoiseBlanker()
         applyEQ()
-        _ = SetChannelState(Self.channelID, 1, 0)
+        _ = SetChannelState(channelID, 1, 0)
     }
 
     func close() {
         guard isOpen else { return }
-        _ = SetChannelState(Self.channelID, 0, 1)
-        CloseChannel(Self.channelID)
+        _ = SetChannelState(channelID, 0, 1)
+        CloseChannel(channelID)
         destroy_anbEXT(nbID)
         destroy_nobEXT(nbID)
         isOpen = false
@@ -219,66 +224,66 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
 
     func setVolume(_ v: Float) {
         volume = Double(max(0, min(1, v)))
-        if isOpen { SetRXAPanelGain1(Self.channelID, volume) }
+        if isOpen { SetRXAPanelGain1(channelID, volume) }
     }
 
     /// AGC time-constant profile: 0 off, 1 long, 2 slow, 3 medium, 4 fast.
     func setAGCMode(_ mode: Int) {
         agcMode = Int32(mode)
-        if isOpen { SetRXAAGCMode(Self.channelID, agcMode) }
+        if isOpen { SetRXAAGCMode(channelID, agcMode) }
     }
 
     /// AGC-T: the maximum gain (dB) the AGC applies — effectively the threshold knob.
     func setAGCTop(_ db: Double) {
         agcTop = db
-        if isOpen { SetRXAAGCTop(Self.channelID, db) }
+        if isOpen { SetRXAAGCTop(channelID, db) }
     }
 
     private func applyAGC() {
-        SetRXAAGCMode(Self.channelID, agcMode)
-        SetRXAAGCTop(Self.channelID, agcTop)
+        SetRXAAGCMode(channelID, agcMode)
+        SetRXAAGCTop(channelID, agcTop)
     }
 
     /// EMNR spectral-subtraction noise reduction (on/off).
     func setSpectralNR(_ on: Bool) {
         emnrOn = on
-        if isOpen { SetRXAEMNRRun(Self.channelID, on ? 1 : 0) }
+        if isOpen { SetRXAEMNRRun(channelID, on ? 1 : 0) }
     }
 
     /// EMNR gain computation method: 0 = linear, 1 = log, 2 = gamma.
     func setSpectralNRGainMethod(_ method: Int) {
         emnrGainMethod = Int32(method)
-        if isOpen { SetRXAEMNRgainMethod(Self.channelID, emnrGainMethod) }
+        if isOpen { SetRXAEMNRgainMethod(channelID, emnrGainMethod) }
     }
 
     /// EMNR noise-power estimator: 0 = OSMS (minimum statistics), 1 = MMSE.
     func setSpectralNRNPEMethod(_ method: Int) {
         emnrNPEMethod = Int32(method)
-        if isOpen { SetRXAEMNRnpeMethod(Self.channelID, emnrNPEMethod) }
+        if isOpen { SetRXAEMNRnpeMethod(channelID, emnrNPEMethod) }
     }
 
     /// EMNR artifact (musical-noise) reduction post-filter.
     func setSpectralNRArtifactReduction(_ on: Bool) {
         emnrArtifact = on
-        if isOpen { SetRXAEMNRaeRun(Self.channelID, on ? 1 : 0) }
+        if isOpen { SetRXAEMNRaeRun(channelID, on ? 1 : 0) }
     }
 
     /// ANR: LMS (least-mean-squares) broadband noise reduction.
     func setANR(_ on: Bool) {
         anrOn = on
-        if isOpen { SetRXAANRRun(Self.channelID, on ? 1 : 0) }
+        if isOpen { SetRXAANRRun(channelID, on ? 1 : 0) }
     }
 
     /// ANR strength via LMS filter length (more taps = deeper reduction, more distortion).
     func setANRStrength(_ taps: Int) {
         anrTaps = Int32(max(16, min(128, taps)))
-        if isOpen { SetRXAANRVals(Self.channelID, anrTaps, 16, 0.0001, 0.1) }
+        if isOpen { SetRXAANRVals(channelID, anrTaps, 16, 0.0001, 0.1) }
     }
 
     /// ANF: automatic notch filter (removes steady carriers/heterodynes).
     func setANF(_ on: Bool) {
         anfOn = on
-        if isOpen { SetRXAANFRun(Self.channelID, on ? 1 : 0) }
+        if isOpen { SetRXAANFRun(channelID, on ? 1 : 0) }
     }
 
     /// Noise Blanker (ANB): blanks impulse/static bursts on the front-end I/Q.
@@ -313,19 +318,19 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     /// Enables/disables the RX 3-band graphic equalizer.
     func setEQ(on: Bool) {
         rxEqOn = on
-        if isOpen { SetRXAEQRun(Self.channelID, on ? 1 : 0) }
+        if isOpen { SetRXAEQRun(channelID, on ? 1 : 0) }
     }
 
     /// Sets RX EQ gains in dB: overall preamp plus low/mid/high bands.
     func setEQGains(preamp: Int, low: Int, mid: Int, high: Int) {
         rxEqGains = [Int32(preamp), Int32(low), Int32(mid), Int32(high)]
-        if isOpen { SetRXAGrphEQ(Self.channelID, &rxEqGains) }
+        if isOpen { SetRXAGrphEQ(channelID, &rxEqGains) }
     }
 
     /// Pushes the current RX EQ gains and run state to the open channel.
     private func applyEQ() {
-        SetRXAGrphEQ(Self.channelID, &rxEqGains)
-        SetRXAEQRun(Self.channelID, rxEqOn ? 1 : 0)
+        SetRXAGrphEQ(channelID, &rxEqGains)
+        SetRXAEQRun(channelID, rxEqOn ? 1 : 0)
     }
 
     /// Re-applies blanker state after the EXT instances are (re)created on open.
@@ -339,25 +344,25 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
 
     /// Re-applies all noise-reduction state to the freshly opened channel.
     private func applyNoiseReduction() {
-        SetRXAEMNRgainMethod(Self.channelID, emnrGainMethod)
-        SetRXAEMNRnpeMethod(Self.channelID, emnrNPEMethod)
-        SetRXAEMNRaeRun(Self.channelID, emnrArtifact ? 1 : 0)
-        SetRXAEMNRRun(Self.channelID, emnrOn ? 1 : 0)
-        SetRXAANRVals(Self.channelID, anrTaps, 16, 0.0001, 0.1)
-        SetRXAANRRun(Self.channelID, anrOn ? 1 : 0)
-        SetRXAANFRun(Self.channelID, anfOn ? 1 : 0)
+        SetRXAEMNRgainMethod(channelID, emnrGainMethod)
+        SetRXAEMNRnpeMethod(channelID, emnrNPEMethod)
+        SetRXAEMNRaeRun(channelID, emnrArtifact ? 1 : 0)
+        SetRXAEMNRRun(channelID, emnrOn ? 1 : 0)
+        SetRXAANRVals(channelID, anrTaps, 16, 0.0001, 0.1)
+        SetRXAANRRun(channelID, anrOn ? 1 : 0)
+        SetRXAANFRun(channelID, anfOn ? 1 : 0)
     }
 
     /// Applies the current mode, passband width, and CW shift to the WDSP channel.
     private func applyMode() {
-        SetRXAMode(Self.channelID, mode.wdspCode)
+        SetRXAMode(channelID, mode.wdspCode)
         let pb = mode.passband(cwPitch: cwPitch, width: filterWidth, low: filterLow, high: filterHigh)
-        RXASetPassband(Self.channelID, pb.low, pb.high)
+        RXASetPassband(channelID, pb.low, pb.high)
         if let shift = mode.shift(cwPitch: cwPitch) {
-            SetRXAShiftFreq(Self.channelID, shift)
-            SetRXAShiftRun(Self.channelID, 1)
+            SetRXAShiftFreq(channelID, shift)
+            SetRXAShiftRun(channelID, 1)
         } else {
-            SetRXAShiftRun(Self.channelID, 0)
+            SetRXAShiftRun(channelID, 0)
         }
     }
 
@@ -395,7 +400,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
                     }
                 }
                 var error: Int32 = 0
-                fexchange0(Self.channelID, &inBuffer, &outBuffer, &error)
+                fexchange0(channelID, &inBuffer, &outBuffer, &error)
                 for k in 0..<Self.bufferSize {
                     audioScratch[k] = Float(outBuffer[k * 2])
                 }

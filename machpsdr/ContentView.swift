@@ -63,6 +63,17 @@ nonisolated enum TXProcessing: String, CaseIterable, Identifiable, Sendable {
     var usesCESSB: Bool { self == .dxPlus }
 }
 
+/// VFO state for an additional receive slice (a receiver beyond the main RX1).
+/// `id` is the slice's receiver index (1-based for extra slices). The main
+/// receiver keeps the full DSP controls; extra slices carry a compact VFO.
+struct SliceInfo: Identifiable, Sendable {
+    let id: Int              // slice / receiver index (1…maxSlices-1)
+    var frequencyHz: UInt32
+    var mode: RadioMode
+    var volume: Float
+    var pan: Float           // −1 = hard left … +1 = hard right
+}
+
 /// Owns the live connection to a single radio and surfaces its state to the UI.
 @MainActor
 @Observable
@@ -129,14 +140,39 @@ final class RadioSession {
     var rxEQMid = 0
     var rxEQHigh = 0
 
+    // Multi-receiver "slices". The main receiver (index 0) uses the properties above;
+    // `extraSlices` are additional independent receivers (indices 1…) with their own
+    // VFO and stereo pan. On-air count is clamped to hardware limits by the connection.
+    static let maxSlices = RadioConnection.maxSlices
+    var extraSlices: [SliceInfo] = []
+    /// Per-slice spectra for the stacked panadapters (populated on connect).
+    private(set) var sliceSpectra: [SpectrumBuffer] = []
+    /// Total active receivers, including the main one.
+    var activeSliceCount: Int { extraSlices.count + 1 }
+    /// Indices (0…activeSliceCount-1) for iterating panadapters.
+    var sliceIndices: [Int] { Array(0..<activeSliceCount) }
+
     let midi = MIDIManager()
     let bandData = BandDataStore()
     private var currentBandOC: UInt8 = 0
     private var lastBandID: String?
 
     init() {
-        selectedMicUID = UserDefaults.standard.string(forKey: "selectedMicUID")
-        selectedOutputUID = UserDefaults.standard.string(forKey: "selectedOutputUID")
+        let defaults = UserDefaults.standard
+        selectedMicUID = defaults.string(forKey: "selectedMicUID")
+        selectedOutputUID = defaults.string(forKey: "selectedOutputUID")
+        // Restore transmit settings across app launches. Guard on object(forKey:)
+        // so an absent key keeps the safe default rather than reading back 0.
+        if defaults.object(forKey: "driveLevel") != nil {
+            driveLevel = defaults.double(forKey: "driveLevel")
+        }
+        if defaults.object(forKey: "micGain") != nil {
+            micGain = defaults.double(forKey: "micGain")
+        }
+        if let procRaw = defaults.string(forKey: "txProcessing"),
+           let proc = TXProcessing(rawValue: procRaw) {
+            txProcessing = proc
+        }
         midi.onTuneStep = { [weak self] steps in
             guard let self, self.midiTuningEnabled else { return }
             self.tuneBy(steps: steps)
@@ -166,11 +202,13 @@ final class RadioSession {
         state = .connecting
         var settings = RadioSettings()
         settings.sampleRate = sampleRate
-        settings.receiverFrequencies = [frequencyHz]
+        settings.receiverCount = activeSliceCount
+        settings.receiverFrequencies = [frequencyHz] + extraSlices.map { $0.frequencyHz }
         settings.transmitFrequency = frequencyHz
         let conn = RadioConnection(radio: radio, settings: settings)
         connection = conn
         spectrumBuffer = conn.spectrum
+        sliceSpectra = conn.spectra
         let outUID = selectedOutputUID
         consumeTask = Task {
             await conn.setOutputDevice(uid: outUID)
@@ -194,6 +232,7 @@ final class RadioSession {
         let conn = connection
         connection = nil
         spectrumBuffer = nil
+        sliceSpectra = []
         lastUpdate = nil
         isTransmitting = false
         isTuning = false
@@ -381,6 +420,7 @@ final class RadioSession {
 
     func setDrive(_ percent: Double) {
         driveLevel = percent
+        UserDefaults.standard.set(percent, forKey: "driveLevel")
         let conn = connection
         let level = driveByte
         Task { await conn?.setDrive(level) }
@@ -388,6 +428,7 @@ final class RadioSession {
 
     func setMicGain(_ gain: Double) {
         micGain = gain
+        UserDefaults.standard.set(gain, forKey: "micGain")
         let conn = connection
         Task { await conn?.setMicGain(gain) }
     }
@@ -413,6 +454,7 @@ final class RadioSession {
     /// Applies a transmit processing preset: compressor on/off + gain, and CESSB on DX+.
     func setTXProcessing(_ profile: TXProcessing) {
         txProcessing = profile
+        UserDefaults.standard.set(profile.rawValue, forKey: "txProcessing")
         let conn = connection
         let on = profile.compressorOn
         let gain = profile.compressorGain
@@ -479,6 +521,62 @@ final class RadioSession {
     }
 
 
+
+    // MARK: - Receive slices (multiple receivers)
+
+    /// Adds a receive slice (up to the app maximum), tuned to the current main VFO.
+    func addSlice() {
+        guard activeSliceCount < Self.maxSlices else { return }
+        let index = activeSliceCount
+        let info = SliceInfo(id: index, frequencyHz: frequencyHz, mode: mode, volume: 0.5, pan: 0)
+        extraSlices.append(info)
+        let conn = connection
+        let n = activeSliceCount
+        Task {
+            await conn?.setActiveSliceCount(n)
+            await conn?.setFrequency(info.frequencyHz, receiver: index)
+            await conn?.setMode(info.mode, slice: index)
+            await conn?.setVolume(info.volume, slice: index)
+            await conn?.setPan(info.pan, slice: index)
+        }
+    }
+
+    /// Removes the highest-numbered receive slice.
+    func removeSlice() {
+        guard !extraSlices.isEmpty else { return }
+        extraSlices.removeLast()
+        let conn = connection
+        let n = activeSliceCount
+        Task { await conn?.setActiveSliceCount(n) }
+    }
+
+    func setSliceFrequency(_ index: Int, _ hz: UInt32) {
+        guard let k = extraSlices.firstIndex(where: { $0.id == index }) else { return }
+        extraSlices[k].frequencyHz = hz
+        let conn = connection
+        Task { await conn?.setFrequency(hz, receiver: index) }
+    }
+
+    func setSliceMode(_ index: Int, _ newMode: RadioMode) {
+        guard let k = extraSlices.firstIndex(where: { $0.id == index }) else { return }
+        extraSlices[k].mode = newMode
+        let conn = connection
+        Task { await conn?.setMode(newMode, slice: index) }
+    }
+
+    func setSliceVolume(_ index: Int, _ v: Float) {
+        guard let k = extraSlices.firstIndex(where: { $0.id == index }) else { return }
+        extraSlices[k].volume = v
+        let conn = connection
+        Task { await conn?.setVolume(v, slice: index) }
+    }
+
+    func setSlicePan(_ index: Int, _ p: Float) {
+        guard let k = extraSlices.firstIndex(where: { $0.id == index }) else { return }
+        extraSlices[k].pan = p
+        let conn = connection
+        Task { await conn?.setPan(p, slice: index) }
+    }
 
     /// Connects to the last radio if disconnected, or disconnects if connected.
     func toggleConnection() {
@@ -564,6 +662,7 @@ final class RadioSession {
         let txeqP = txEQPreamp, txeqL = txEQLow, txeqM = txEQMid, txeqH = txEQHigh
         let rxeqOn = rxEQ
         let rxeqP = rxEQPreamp, rxeqL = rxEQLow, rxeqM = rxEQMid, rxeqH = rxEQHigh
+        let extras = extraSlices
         // Detect the band for the current frequency so the amp is set on connect.
         var bandOC: UInt8?
         if bandData.enabled, let band = Band.band(for: frequencyHz) {
@@ -604,6 +703,13 @@ final class RadioSession {
             await conn?.setRXEQGains(preamp: rxeqP, low: rxeqL, mid: rxeqM, high: rxeqH)
             await conn?.setRXEQ(on: rxeqOn)
             if let bandOC { await conn?.setOpenCollector(bandOC) }
+            // Push each extra slice's VFO after the main receiver is configured.
+            for slice in extras {
+                await conn?.setMode(slice.mode, slice: slice.id)
+                await conn?.setFrequency(slice.frequencyHz, receiver: slice.id)
+                await conn?.setVolume(slice.volume, slice: slice.id)
+                await conn?.setPan(slice.pan, slice: slice.id)
+            }
         }
     }
 }
@@ -708,6 +814,66 @@ private struct PTTButton: View {
     }
 }
 
+/// A compact VFO row for one extra receive slice. The frequency uses a local `@State`
+/// edit buffer that only syncs from the model on an explicit change — so the ~10×/sec
+/// live-status re-renders can't clobber in-progress typing (the bug where a typed
+/// slice frequency reverted to the slice's previous value).
+private struct SliceRowView: View {
+    let slice: SliceInfo
+    @Bindable var session: RadioSession
+    @State private var mhz: Double = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("RX\(slice.id + 1)").font(.headline).foregroundStyle(.cyan)
+            HStack {
+                Text("Freq")
+                TextField("MHz", value: $mhz, format: .number.precision(.fractionLength(6)))
+                    .frame(width: 110)
+                    .multilineTextAlignment(.trailing)
+                    .onSubmit {
+                        session.setSliceFrequency(slice.id, UInt32(max(0, (mhz * 1_000_000).rounded())))
+                    }
+                Text("MHz").foregroundStyle(.secondary)
+            }
+            Picker("Mode", selection: Binding(
+                get: { slice.mode },
+                set: { session.setSliceMode(slice.id, $0) }
+            )) {
+                ForEach(RadioMode.allCases) { m in Text(m.rawValue).tag(m) }
+            }
+            HStack {
+                Image(systemName: "speaker.wave.2.fill").foregroundStyle(.secondary)
+                Slider(value: Binding(
+                    get: { Double(slice.volume) },
+                    set: { session.setSliceVolume(slice.id, Float($0)) }
+                ), in: 0...1)
+            }
+            HStack {
+                Text("Pan")
+                Slider(value: Binding(
+                    get: { Double(slice.pan) },
+                    set: { session.setSlicePan(slice.id, Float($0)) }
+                ), in: -1...1, step: 0.05)
+                Text(panLabel)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+            }
+        }
+        .padding(.vertical, 4)
+        .onAppear { mhz = Double(slice.frequencyHz) / 1_000_000 }
+        .onChange(of: slice.frequencyHz) { _, v in mhz = Double(v) / 1_000_000 }
+    }
+
+    /// "C" for center, "L##"/"R##" for a percentage toward that side.
+    private var panLabel: String {
+        if abs(slice.pan) < 0.05 { return "C" }
+        let pct = Int((abs(slice.pan) * 100).rounded())
+        return slice.pan < 0 ? "L\(pct)" : "R\(pct)"
+    }
+}
+
 /// Radio detail: connection controls, tuning, and a live status readout proving the I/Q stream.
 struct RadioDetailView: View {
     let radio: DiscoveredRadio
@@ -718,12 +884,31 @@ struct RadioDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if session.isConnected, let spectrum = session.spectrumBuffer {
-                SpectrumView(spectrum: spectrum) { hz in
-                    session.setFrequency(hz)
-                    frequencyMHz = Double(hz) / 1_000_000
+            if session.isConnected {
+                VStack(spacing: 2) {
+                    ForEach(session.sliceIndices, id: \.self) { idx in
+                        if idx < session.sliceSpectra.count {
+                            SpectrumView(spectrum: session.sliceSpectra[idx]) { hz in
+                                if idx == 0 {
+                                    session.setFrequency(hz)
+                                    frequencyMHz = Double(hz) / 1_000_000
+                                } else {
+                                    session.setSliceFrequency(idx, hz)
+                                }
+                            }
+                            .frame(minHeight: session.activeSliceCount > 1 ? 150 : 260)
+                            .overlay(alignment: .topLeading) {
+                                Text("RX\(idx + 1)")
+                                    .font(.caption2.bold().monospacedDigit())
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
+                                    .foregroundStyle(idx == 0 ? .green : .cyan)
+                                    .padding(4)
+                            }
+                        }
+                    }
                 }
-                .frame(minHeight: 260)
             }
 
             Form {
@@ -745,6 +930,9 @@ struct RadioDetailView: View {
                 if session.isConnected {
                     Section("Tuning") {
                         tuningControls
+                    }
+                    Section("Receivers (Slices)") {
+                        slicesControls
                     }
                     Section("AGC & RF Gain") {
                         agcControls
@@ -778,6 +966,21 @@ struct RadioDetailView: View {
         }
         .onAppear { frequencyMHz = Double(session.frequencyHz) / 1_000_000 }
         .onDisappear { session.disconnect() }
+    }
+
+    /// Multi-receiver controls: a stepper for the number of slices, plus a compact
+    /// VFO (frequency, mode, volume, pan) for each extra slice beyond the main RX1.
+    @ViewBuilder
+    private var slicesControls: some View {
+        Stepper("Slices: \(session.activeSliceCount)",
+                onIncrement: { session.addSlice() },
+                onDecrement: { session.removeSlice() })
+        Text("RX1 (above) is the main receiver with full controls. Extra slices are independent receivers sharing the antenna — give each its own frequency and pan it left/right in the stereo mix.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        ForEach(session.extraSlices) { slice in
+            SliceRowView(slice: slice, session: session)
+        }
     }
 
     /// Mode-appropriate filter controls: CW pitch+width, SSB/DIGI low+high cut,

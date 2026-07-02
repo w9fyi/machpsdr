@@ -103,9 +103,12 @@ nonisolated struct RadioSettings {
         let moxBit: UInt8 = mox ? 0x01 : 0x00
         switch slot {
         case 0:
-            // Configuration: C0 = 0x00, C1 = sample-rate bits, C4 bits 3–5 = (receivers − 1).
+            // Configuration: C0 = 0x00, C1 = sample-rate bits.
+            // C4: bit 2 (0x04) = duplex — always set, matching piHPSDR/Thetis; the ANAN
+            // needs this for correct multi-receiver framing (without it, requesting a
+            // second receiver corrupts the USB-frame sync). Bits 5:3 = (receivers − 1).
             // C2 bits 1–7 = the 7 open-collector outputs (amp band data, etc.).
-            let c4 = UInt8((max(receiverCount, 1) - 1) << 3)
+            let c4 = 0x04 | UInt8((max(receiverCount, 1) - 1) << 3)
             let c2 = (openCollector & 0x7F) << 1
             return (0x00 | moxBit, sampleRate.rawValue, c2, 0x00, c4)
         case 1:
@@ -211,16 +214,20 @@ nonisolated enum HPSDRFrame {
         return Int16(clamped * 32767)
     }
 
-    /// The result of parsing one EP6 packet: the latest status and the decoded RX0 I/Q samples.
+    /// The result of parsing one EP6 packet: the latest status and the decoded I/Q
+    /// samples for every active receiver.
     struct EP6Result {
         var sequence: UInt32
         var status: RadioStreamStatus
-        /// Interleaved I/Q for receiver 0 (i0, q0, i1, q1, …) as normalized Floats in [-1, 1).
-        var samples: [Float]
+        /// Interleaved I/Q per receiver: `receivers[rx] == [i0, q0, i1, q1, …]`,
+        /// normalized Floats in [-1, 1). One inner array per active DDC.
+        var receivers: [[Float]]
+        /// Convenience accessor for receiver 0 (empty if there are none).
+        var samples: [Float] { receivers.first ?? [] }
     }
 
     /// Parses a received EP6 packet. Returns nil if the header/sync is invalid.
-    /// Currently decodes receiver 0 only (sufficient for single-RX bring-up).
+    /// Decodes all `receiverCount` receivers from each interleaved sample group.
     static func parseEP6(_ data: [UInt8], receiverCount: Int) -> EP6Result? {
         guard data.count >= HPSDRProtocol1.frameSize,
               data[0] == HPSDRProtocol1.metisMagic0,
@@ -232,9 +239,11 @@ nonisolated enum HPSDRFrame {
             | (UInt32(data[6]) << 8) | UInt32(data[7])
 
         var status = RadioStreamStatus()
-        var samples: [Float] = []
-        // Each I/Q sample group: 3 bytes I + 3 bytes Q per receiver, then 2 bytes mic.
-        let bytesPerGroup = 6 * receiverCount + 2
+        let rxCount = max(receiverCount, 1)
+        var receivers = [[Float]](repeating: [], count: rxCount)
+        for rx in 0..<rxCount { receivers[rx].reserveCapacity(256) }
+        // Each I/Q sample group is (3 bytes I + 3 bytes Q) per receiver, then 2 bytes mic.
+        let bytesPerGroup = 6 * rxCount + 2
         let scale: Float = 1.0 / 8_388_608.0 // 2^23
 
         for usbOffset in [8, 520] {
@@ -255,20 +264,24 @@ nonisolated enum HPSDRFrame {
                 status.versionC4 = data[usbOffset + 7]
             }
 
-            // Decode RX0 I/Q from the sample area.
+            // Decode every receiver's I/Q from each interleaved group. Within a group,
+            // receiver rx occupies bytes [rx*6 ..< rx*6+6] (I: 3, Q: 3); mic trails.
             let sampleBase = usbOffset + HPSDRProtocol1.usbHeaderSize
             let sampleAreaSize = HPSDRProtocol1.usbFrameSize - HPSDRProtocol1.usbHeaderSize
             let groupCount = sampleAreaSize / bytesPerGroup
             for group in 0..<groupCount {
-                let p = sampleBase + group * bytesPerGroup
-                let i = HPSDRProtocol1.sample24(data[p], data[p + 1], data[p + 2])
-                let q = HPSDRProtocol1.sample24(data[p + 3], data[p + 4], data[p + 5])
-                // Raw I/Q (no conjugation here) so the panadapter shows the correct
-                // orientation. WDSP gets a conjugated copy in WDSPRadio.
-                samples.append(Float(i) * scale)
-                samples.append(Float(q) * scale)
+                let groupBase = sampleBase + group * bytesPerGroup
+                for rx in 0..<rxCount {
+                    let p = groupBase + rx * 6
+                    let i = HPSDRProtocol1.sample24(data[p], data[p + 1], data[p + 2])
+                    let q = HPSDRProtocol1.sample24(data[p + 3], data[p + 4], data[p + 5])
+                    // Raw I/Q (no conjugation here) so the panadapter shows the correct
+                    // orientation. WDSP gets a conjugated copy in WDSPRadio.
+                    receivers[rx].append(Float(i) * scale)
+                    receivers[rx].append(Float(q) * scale)
+                }
             }
         }
-        return EP6Result(sequence: sequence, status: status, samples: samples)
+        return EP6Result(sequence: sequence, status: status, receivers: receivers)
     }
 }
