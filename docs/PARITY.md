@@ -109,8 +109,10 @@ CFC (+post-EQ) → bandpass → COMP → aux bandpass → CESSB.
 
 ## 7. Integration / Control
 
-- ⬜ CAT server — Kenwood TS-2000 emulation (ID 019) + ZZxx extended set, TCP/IP CAT
-  (macOS: TCP + PTY virtual serial); this is what WSJT-X/fldigi/loggers speak
+- ✅ CAT server — Kenwood TS-2000 emulation (ID 019) over TCP (default port 13013):
+  FA/FB/MD/IF/TX/RX/PC/AG/SM + ID/PS/AI/FR/FT; live-verified from a LAN client
+  (drives the SPE 2K-FA via a Raspberry Pi bridge). ⬜ ZZxx extended set, PTY
+  virtual serial, AI auto-information push
 - ✅ MIDI tuning knob; ⬜ general MIDI mapping (buttons/knobs/wheels → commands)
 - ⬜ TCI server (WebSocket; spots, audio/IQ streaming) — modern loggers/SDR tools speak it
 - ⬜ Virtual audio routing (VAC equivalent) — macOS: Core Audio aggregate/driver or
