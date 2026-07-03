@@ -116,12 +116,14 @@ nonisolated final class SliceAudioMixer: @unchecked Sendable {
         engine.prepare()
         try engine.start()
 
-        // 1 Hz diagnostics logger, off the render thread.
-        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
-        timer.schedule(deadline: .now() + 1, repeating: 1)
-        timer.setEventHandler { [weak self] in self?.logDiagnostics() }
-        timer.resume()
-        dbgTimer = timer
+        // 1 Hz diagnostics logger, off the render thread (gated by DSPDiagnostics).
+        if DSPDiagnostics.enabled {
+            let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+            timer.schedule(deadline: .now() + 1, repeating: 1)
+            timer.setEventHandler { [weak self] in self?.logDiagnostics() }
+            timer.resume()
+            dbgTimer = timer
+        }
     }
 
     func stop() {

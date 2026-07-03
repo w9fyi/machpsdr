@@ -2,6 +2,15 @@ import Foundation
 import Accelerate
 import Darwin
 
+/// Gates the 1 Hz `MIX:`/`DSP:` stream-diagnostics logs (rate/gap/sync counters).
+/// Off by default; enable for live stream debugging with the launch argument
+/// `-dspDiagnostics YES` or `defaults write <bundle-id> dspDiagnostics -bool YES`.
+/// Rare event and error logs (slice open/close, socket rebuild, slow commands)
+/// are always on.
+nonisolated enum DSPDiagnostics {
+    static let enabled = UserDefaults.standard.bool(forKey: "dspDiagnostics")
+}
+
 /// A throttled snapshot of the live stream, delivered to UI/consumers ~10×/second.
 nonisolated struct StreamUpdate: Sendable {
     var status: RadioStreamStatus
@@ -861,30 +870,32 @@ actor RadioConnection {
                 dbgEP2Sent += ep2SentInInterval
                 ep2SentInInterval = 0
                 if dbgFlushCount >= 10 {   // ~1×/sec
-                    // Header/sync diagnostics on the most recent datagram — computed
-                    // only here (1×/sec), never in the per-packet path.
-                    var hdr = "?"
-                    var sync = "NONE"
-                    if dbgReceived > 522 {
-                        hdr = String(format: "%02X %02X %02X %02X",
-                                     buffer[0], buffer[1], buffer[2], buffer[3])
-                        // Scan for the 7F 7F 7F USB sync word and report every offset
-                        // (should be 8 and 520 in a standard frame).
-                        var offsets: [Int] = []
-                        var i = 0
-                        let limit = dbgReceived - 2
-                        while i < limit {
-                            if buffer[i] == 0x7F && buffer[i + 1] == 0x7F && buffer[i + 2] == 0x7F {
-                                offsets.append(i)
-                                if offsets.count >= 6 { break }
+                    if DSPDiagnostics.enabled {
+                        // Header/sync diagnostics on the most recent datagram — computed
+                        // only here (1×/sec), never in the per-packet path.
+                        var hdr = "?"
+                        var sync = "NONE"
+                        if dbgReceived > 522 {
+                            hdr = String(format: "%02X %02X %02X %02X",
+                                         buffer[0], buffer[1], buffer[2], buffer[3])
+                            // Scan for the 7F 7F 7F USB sync word and report every offset
+                            // (should be 8 and 520 in a standard frame).
+                            var offsets: [Int] = []
+                            var i = 0
+                            let limit = dbgReceived - 2
+                            while i < limit {
+                                if buffer[i] == 0x7F && buffer[i + 1] == 0x7F && buffer[i + 2] == 0x7F {
+                                    offsets.append(i)
+                                    if offsets.count >= 6 { break }
+                                }
+                                i += 1
                             }
-                            i += 1
+                            if !offsets.isEmpty { sync = offsets.map(String.init).joined(separator: ",") }
                         }
-                        if !offsets.isEmpty { sync = offsets.map(String.init).joined(separator: ",") }
+                        let drainStr = String(format: "%.1f", dbgMaxDrainMs)
+                        let procStr = String(format: "%.1f", dbgMaxProcMs)
+                        NSLog("DSP: rxCount=\(dbgRxCount) packetRate=\(pps)/s gaps=\(dbgGaps)/s ep2=\(dbgEP2Sent)/s rx0decoded=\(dbgRx0Samples)/s rx1decoded=\(dbgRx1Samples)/s cmds=\(dbgCmdCount)/s maxDrain=\(drainStr)ms maxProc=\(procStr)ms resyncs=\(assembler.resyncs) recv=\(dbgReceived) hdr=[\(hdr)] sync=[\(sync)]")
                     }
-                    let drainStr = String(format: "%.1f", dbgMaxDrainMs)
-                    let procStr = String(format: "%.1f", dbgMaxProcMs)
-                    NSLog("DSP: rxCount=\(dbgRxCount) packetRate=\(pps)/s gaps=\(dbgGaps)/s ep2=\(dbgEP2Sent)/s rx0decoded=\(dbgRx0Samples)/s rx1decoded=\(dbgRx1Samples)/s cmds=\(dbgCmdCount)/s maxDrain=\(drainStr)ms maxProc=\(procStr)ms resyncs=\(assembler.resyncs) recv=\(dbgReceived) hdr=[\(hdr)] sync=[\(sync)]")
                     dbgFlushCount = 0
                     dbgGaps = 0
                     dbgEP2Sent = 0

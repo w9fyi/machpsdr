@@ -125,6 +125,10 @@ final class RadioSession {
            let proc = TXProcessing(rawValue: procRaw) {
             txProcessing = proc
         }
+        if defaults.object(forKey: "sampleRate") != nil,
+           let rate = HPSDRProtocol1.SampleRate(rawValue: UInt8(clamping: defaults.integer(forKey: "sampleRate"))) {
+            sampleRate = rate
+        }
         if let data = defaults.data(forKey: "manualNotches"),
            let saved = try? JSONDecoder().decode([ManualNotch].self, from: data) {
             manualNotches = saved
@@ -216,6 +220,7 @@ final class RadioSession {
 
     func setSampleRate(_ rate: HPSDRProtocol1.SampleRate) {
         sampleRate = rate
+        UserDefaults.standard.set(Int(rate.rawValue), forKey: "sampleRate")
         let conn = connection
         Task { await conn?.setSampleRate(rate) }
     }
