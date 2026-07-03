@@ -104,6 +104,12 @@ final class RadioSession {
     /// Indices (0…activeSliceCount-1) for iterating panadapters.
     var sliceIndices: Range<Int> { 0..<activeSliceCount }
 
+    // CAT server (Kenwood TS-2000 emulation over TCP for WSJT-X/fldigi/loggers).
+    // Enabled state and port are persisted.
+    private(set) var catEnabled = false
+    private(set) var catPort = 13013
+    let catServer = CATServer()
+
     let midi = MIDIManager()
     let bandData = BandDataStore()
     private var currentBandOC: UInt8 = 0
@@ -134,11 +140,36 @@ final class RadioSession {
             manualNotches = saved
             nextNotchID = (saved.map(\.id).max() ?? -1) + 1
         }
+        catEnabled = defaults.bool(forKey: "catEnabled")
+        if defaults.object(forKey: "catPort") != nil {
+            catPort = defaults.integer(forKey: "catPort")
+        }
         midi.onTuneStep = { [weak self] steps in
             guard let self, self.midiTuningEnabled else { return }
             self.tuneBy(steps: steps)
         }
         midi.start()
+        if catEnabled { catServer.start(port: UInt16(clamping: catPort), radio: self) }
+    }
+
+    // MARK: - CAT server
+
+    func setCATEnabled(_ on: Bool) {
+        catEnabled = on
+        UserDefaults.standard.set(on, forKey: "catEnabled")
+        if on {
+            catServer.start(port: UInt16(clamping: catPort), radio: self)
+        } else {
+            catServer.stop()
+        }
+    }
+
+    /// Sets the CAT TCP port (1–65535), persists it, and restarts the server if running.
+    func setCATPort(_ port: Int) {
+        let clamped = min(65535, max(1, port))
+        catPort = clamped
+        UserDefaults.standard.set(clamped, forKey: "catPort")
+        if catEnabled { catServer.start(port: UInt16(clamping: clamped), radio: self) }
     }
 
     /// Adjusts the receiver frequency by `steps` tuning detents.
@@ -812,4 +843,9 @@ final class RadioSession {
             }
         }
     }
+}
+
+// The CAT command surface. Everything but signalRMS is satisfied by existing members.
+extension RadioSession: CATRadioControl {
+    var signalRMS: Float { lastUpdate?.signalRMS ?? 0 }
 }

@@ -11,6 +11,8 @@ struct SettingsView: View {
                 .tabItem { Label("Audio", systemImage: "mic") }
             BandDataSettingsView()
                 .tabItem { Label("Band Data", systemImage: "fibrechannel") }
+            CATSettingsView()
+                .tabItem { Label("CAT", systemImage: "network") }
         }
         .frame(width: 480, height: 500)
     }
