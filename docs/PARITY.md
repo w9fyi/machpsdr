@@ -119,6 +119,9 @@ CFC (+post-EQ) → bandpass → COMP → aux bandpass → CESSB.
   direct audio bridge to digimode apps
 - ⬜ N1MM+ spectrum UDP feed (:13064)
 - ✅ OC band-data pins (J16) per band — drives the SPE 2K-FA (exceeds Thetis: we auto-follow)
+- ✅ HL2 N2ADR IO board TX-frequency feed (I2C regs 0–4 via C&C 0x3D, piHPSDR-compatible) —
+  the board's m0hpf_spe firmware emits Yaesu FT-2000 CAT at 19200 to the 2K-FA
+  (amp CAT menu: YAESU [FTxxxx 2007+]); live-verified
 - ➖ Alex control, Andromeda/Odin panels
 - ⬜ FT8/FT4 native decode + PSK Reporter (Thetis itself lacks this — differentiator)
 - ⬜ FreeDV native (codec2) + FreeDV Reporter (differentiator)

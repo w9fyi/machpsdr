@@ -310,11 +310,15 @@ actor RadioConnection {
         dspCommands.clear()   // drop anything queued while disconnected
         let commands = dspCommands
         let socket = socketBox
+        // Hermes Lite 2 only: keep the N2ADR IO board (if fitted) fed with the TX
+        // frequency so its firmware can band-follow an amplifier over its DB9 serial.
+        let feedIOBoard = radio.board == .hermesLite
         let thread = Thread {
             RadioConnection.runLoop(socket: socket, settings: box, running: flag,
                                     updates: continuation, engines: sliceEngines,
                                     wdspTx: txEngine, transmit: txState,
-                                    micRing: micBuffer, commands: commands)
+                                    micRing: micBuffer, commands: commands,
+                                    feedIOBoard: feedIOBoard)
         }
         thread.name = "RadioConnection.IO"
         thread.stackSize = 512 * 1024
@@ -654,9 +658,22 @@ actor RadioConnection {
                                 wdspTx: WDSPTransmit,
                                 transmit: TransmitBox,
                                 micRing: AudioRingBuffer,
-                                commands: DSPCommandQueue) {
+                                commands: DSPCommandQueue,
+                                feedIOBoard: Bool) {
         var seqOut: UInt32 = 0
         var slotCounter = 0
+
+        // N2ADR IO board frequency feed (HL2 only): pending one-byte I2C register
+        // writes, drained one per EP2 frame in the second command slot. `ioSentHz`
+        // is the last frequency queued (0 = never — triggers the register reset +
+        // first burst). Bursts are throttled to one per 0.5 s and refreshed every
+        // 10 s: the writes carry no ACK, so a lost datagram or a board power cycle
+        // heals on the next refresh (re-writing an unchanged frequency is a no-op
+        // for the board's amplifier CAT output).
+        var ioPending: [(register: UInt8, value: UInt8)] = []
+        var ioSentHz: UInt32 = 0
+        var ioNextBurstNs: UInt64 = 0
+        var ioRefreshNs: UInt64 = 0
 
         // TX I/Q buffering: WDSP produces 1024-sample blocks; each EP2 frame needs 126.
         var txBuffer = [Float]()
@@ -734,6 +751,9 @@ actor RadioConnection {
                 seqOut = nextSeq
                 nextEP2SendNs = DispatchTime.now().uptimeNanoseconds
                 lastFD = fd
+                ioPending.removeAll()
+                ioSentHz = 0
+                ioNextBurstNs = 0
             }
 
             let settingsSnapshot = settings.current
@@ -804,6 +824,27 @@ actor RadioConnection {
                 sendSettings.drive = transmitting ? transmit.drive : 0
                 let slots = sendSettings.commandSlotCount
 
+                // IO board: queue a register burst when the TX frequency changed
+                // (or on the periodic refresh), then ride one write per frame in
+                // the second command slot. A full burst is 6 frames ≈ 16 ms.
+                var ioCommand: (UInt8, UInt8, UInt8, UInt8, UInt8)? = nil
+                if feedIOBoard {
+                    if ioPending.isEmpty, nowNs >= ioNextBurstNs,
+                       sendSettings.transmitFrequency != ioSentHz || nowNs >= ioRefreshNs {
+                        if ioSentHz == 0 { ioPending.append((HL2IOBoard.regControl, 1)) }
+                        ioPending.append(contentsOf: HL2IOBoard.frequencyWrites(hz: sendSettings.transmitFrequency))
+                        ioSentHz = sendSettings.transmitFrequency
+                        ioNextBurstNs = nowNs &+ 500_000_000
+                        ioRefreshNs = nowNs &+ 10_000_000_000
+                    }
+                    if !ioPending.isEmpty {
+                        let write = ioPending.removeFirst()
+                        ioCommand = HL2IOBoard.writeCommand(register: write.register,
+                                                            value: write.value,
+                                                            mox: transmitting)
+                    }
+                }
+
                 if transmitting && tuning {
                     // Steady tune carrier: phase-continuous complex sinusoid.
                     let amp: Float = 0.6
@@ -815,7 +856,7 @@ actor RadioConnection {
                     }
                     HPSDRFrame.buildEP2(into: &ep2Frame, sequence: seqOut, settings: sendSettings,
                                         slot1: slotCounter % slots, slot2: (slotCounter + 1) % slots,
-                                        txIQ: tuneFrame)
+                                        txIQ: tuneFrame, command2: ioCommand)
                 } else if transmitting {
                     // Voice transmit: feed microphone audio through WDSP TXA. Guard the
                     // refill on `running` and on an empty block so a teardown that closes
@@ -845,11 +886,12 @@ actor RadioConnection {
                     }
                     HPSDRFrame.buildEP2(into: &ep2Frame, sequence: seqOut, settings: sendSettings,
                                         slot1: slotCounter % slots, slot2: (slotCounter + 1) % slots,
-                                        txIQ: frameIQ)
+                                        txIQ: frameIQ, command2: ioCommand)
                 } else {
                     if txPos != 0 || !txBuffer.isEmpty { txBuffer.removeAll(keepingCapacity: true); txPos = 0 }
                     HPSDRFrame.buildEP2(into: &ep2Frame, sequence: seqOut, settings: sendSettings,
-                                        slot1: slotCounter % slots, slot2: (slotCounter + 1) % slots)
+                                        slot1: slotCounter % slots, slot2: (slotCounter + 1) % slots,
+                                        command2: ioCommand)
                 }
                 slotCounter += 2
                 seqOut &+= 1

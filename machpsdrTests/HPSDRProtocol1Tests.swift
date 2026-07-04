@@ -186,6 +186,44 @@ import Foundation
         #expect(frame[534] == 0x80 && frame[535] == 0x01)
     }
 
+    // MARK: - HL2 IO board I2C writes
+
+    @Test func ioBoardWriteCommandBytes() {
+        // I2C bus 2 (C&C addr 0x3D << 1), write cookie, stop bit | Pico addr 0x1D.
+        let c = HL2IOBoard.writeCommand(register: 5, value: 1, mox: false)
+        #expect(c.0 == 0x7A)
+        #expect(c.1 == 0x06)
+        #expect(c.2 == 0x9D)
+        #expect(c.3 == 5)
+        #expect(c.4 == 1)
+    }
+
+    @Test func ioBoardWriteCommandCarriesMoxBit() {
+        #expect(HL2IOBoard.writeCommand(register: 0, value: 0, mox: true).0 == 0x7B)
+    }
+
+    @Test func ioBoardFrequencyWritesBigEndianByte0Last() {
+        // 14,074,000 Hz = 0x00D6C090; registers 0 (MSB) … 4 (LSB), LSB last
+        // because writing register 4 is what latches the value in the Pico.
+        let writes = HL2IOBoard.frequencyWrites(hz: 14_074_000)
+        #expect(writes.map(\.register) == [0, 1, 2, 3, 4])
+        #expect(writes.map(\.value) == [0x00, 0x00, 0xD6, 0xC0, 0x90])
+    }
+
+    @Test func ep2Command2OverridesSlot2Only() {
+        let s = RadioSettings()
+        let io = HL2IOBoard.writeCommand(register: 4, value: 0x90, mox: false)
+        let frame = HPSDRFrame.buildEP2(sequence: 0, settings: s, slot1: 0, slot2: 1,
+                                        command2: io)
+        // Slot 1 (offset 8) still carries the rotation's config command.
+        let c1 = s.commandBytes(slot: 0)
+        #expect(frame[11] == c1.0 && frame[12] == c1.1 && frame[13] == c1.2
+                && frame[14] == c1.3 && frame[15] == c1.4)
+        // Slot 2 (offset 520) carries the raw I2C write instead of slot index 1.
+        #expect(frame[523] == 0x7A && frame[524] == 0x06 && frame[525] == 0x9D
+                && frame[526] == 4 && frame[527] == 0x90)
+    }
+
     // MARK: - parseEP6
 
     /// Builds a valid 1032-byte EP6 frame. `fill` populates the sample area per

@@ -139,6 +139,38 @@ nonisolated struct RadioSettings {
     }
 }
 
+/// C&C encoding for the N2ADR IO board that plugs into a Hermes Lite 2. The board's
+/// Pico listens at I2C address 0x1D on the HL2's second I2C bus, reachable from the
+/// host as C&C memory address 0x3D. The SDR host programs the 5-byte TX frequency
+/// (Hz) into registers 0–4 so the board's firmware can band-follow an amplifier
+/// (e.g. the m0hpf_spe firmware emits Yaesu FT-2000-style CAT at 19200 baud for the
+/// SPE Expert). Writes are fire-and-forget (no RQST/ACK bit), matching piHPSDR:
+/// a write with no board installed is a harmless I2C NAK.
+nonisolated enum HL2IOBoard {
+    /// Registers 0–4 hold the TX frequency, MSB (byte 4) first.
+    static let regTxFreqByte4: UInt8 = 0
+    /// Writing 1 resets all Pico registers to zero (recommended at connect).
+    static let regControl: UInt8 = 5
+
+    /// One register write as EP2 command bytes: C0 = I2C-bus-2 address (0x3D) plus
+    /// the MOX bit, C1 = 0x06 write cookie, C2 = stop bit | Pico I2C address,
+    /// C3 = register, C4 = value.
+    static func writeCommand(register: UInt8, value: UInt8,
+                             mox: Bool) -> (UInt8, UInt8, UInt8, UInt8, UInt8) {
+        ((0x3D << 1) | (mox ? 0x01 : 0x00), 0x06, 0x80 | 0x1D, register, value)
+    }
+
+    /// The register writes programming the TX frequency. Byte 0 (LSB, register 4)
+    /// must go last: that write makes the Pico latch the whole 5-byte value.
+    static func frequencyWrites(hz: UInt32) -> [(register: UInt8, value: UInt8)] {
+        [(0, 0),   // frequency byte 4: always 0 for a 32-bit Hz value
+         (1, UInt8((hz >> 24) & 0xFF)),
+         (2, UInt8((hz >> 16) & 0xFF)),
+         (3, UInt8((hz >> 8) & 0xFF)),
+         (4, UInt8(hz & 0xFF))]
+    }
+}
+
 /// Status reported by the radio in the C0–C4 bytes of received EP6 frames.
 nonisolated struct RadioStreamStatus: Equatable {
     var ptt = false
@@ -160,21 +192,26 @@ nonisolated enum HPSDRFrame {
                          settings: RadioSettings,
                          slot1: Int,
                          slot2: Int,
-                         txIQ: [Float]? = nil) -> [UInt8] {
+                         txIQ: [Float]? = nil,
+                         command2: (UInt8, UInt8, UInt8, UInt8, UInt8)? = nil) -> [UInt8] {
         var frame = [UInt8](repeating: 0, count: HPSDRProtocol1.frameSize)
         buildEP2(into: &frame, sequence: sequence, settings: settings,
-                 slot1: slot1, slot2: slot2, txIQ: txIQ)
+                 slot1: slot1, slot2: slot2, txIQ: txIQ, command2: command2)
         return frame
     }
 
     /// In-place variant: rewrites `frame` (which must be `frameSize` bytes). The send
     /// loop reuses one frame buffer so no allocation happens per outgoing packet.
+    /// A non-nil `command2` carries raw C0–C4 bytes in the second USB sub-frame in
+    /// place of `slot2` (used for out-of-rotation commands like IO-board I2C writes;
+    /// the skipped slot comes around again on the next rotation cycle).
     static func buildEP2(into frame: inout [UInt8],
                          sequence: UInt32,
                          settings: RadioSettings,
                          slot1: Int,
                          slot2: Int,
-                         txIQ: [Float]? = nil) {
+                         txIQ: [Float]? = nil,
+                         command2: (UInt8, UInt8, UInt8, UInt8, UInt8)? = nil) {
         precondition(frame.count == HPSDRProtocol1.frameSize)
         frame.withUnsafeMutableBytes { _ = memset($0.baseAddress, 0, $0.count) }
         frame[0] = HPSDRProtocol1.metisMagic0
@@ -188,7 +225,7 @@ nonisolated enum HPSDRFrame {
         // 63 samples per USB frame.
         writeUSBFrame(into: &frame, at: 8, command: settings.commandBytes(slot: slot1),
                       txIQ: txIQ, sampleStart: 0)
-        writeUSBFrame(into: &frame, at: 520, command: settings.commandBytes(slot: slot2),
+        writeUSBFrame(into: &frame, at: 520, command: command2 ?? settings.commandBytes(slot: slot2),
                       txIQ: txIQ, sampleStart: 63)
     }
 
