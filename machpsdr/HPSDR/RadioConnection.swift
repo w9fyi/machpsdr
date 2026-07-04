@@ -270,6 +270,7 @@ actor RadioConnection {
         // if the user disconnects first).
         var s = settingsBox.current
         s.receiverCount = activeSliceCount
+        s.hermesLite = radio.board == .hermesLite
         settingsBox.current = s
 
         guard let stream = Self.openStreamSocket(ip: radio.ipAddress,
@@ -310,15 +311,17 @@ actor RadioConnection {
         dspCommands.clear()   // drop anything queued while disconnected
         let commands = dspCommands
         let socket = socketBox
-        // Hermes Lite 2 only: keep the N2ADR IO board (if fitted) fed with the TX
-        // frequency so its firmware can band-follow an amplifier over its DB9 serial.
-        let feedIOBoard = radio.board == .hermesLite
+        // Hermes Lite 2 only: select the N2ADR filter board's LPF from the TX
+        // frequency (the HL2 gateware does no filter selection of its own) and keep
+        // the N2ADR IO board (if fitted) fed with the TX frequency so its firmware
+        // can band-follow an amplifier over its DB9 serial.
+        let hermesLite = radio.board == .hermesLite
         let thread = Thread {
             RadioConnection.runLoop(socket: socket, settings: box, running: flag,
                                     updates: continuation, engines: sliceEngines,
                                     wdspTx: txEngine, transmit: txState,
                                     micRing: micBuffer, commands: commands,
-                                    feedIOBoard: feedIOBoard)
+                                    hermesLite: hermesLite)
         }
         thread.name = "RadioConnection.IO"
         thread.stackSize = 512 * 1024
@@ -659,7 +662,7 @@ actor RadioConnection {
                                 transmit: TransmitBox,
                                 micRing: AudioRingBuffer,
                                 commands: DSPCommandQueue,
-                                feedIOBoard: Bool) {
+                                hermesLite: Bool) {
         var seqOut: UInt32 = 0
         var slotCounter = 0
 
@@ -674,6 +677,8 @@ actor RadioConnection {
         var ioSentHz: UInt32 = 0
         var ioNextBurstNs: UInt64 = 0
         var ioRefreshNs: UInt64 = 0
+        // Next send of the HL2 TX-buffer config (addr 0x17, PTT hang + latency).
+        var txConfigNextNs: UInt64 = 0
 
         // TX I/Q buffering: WDSP produces 1024-sample blocks; each EP2 frame needs 126.
         var txBuffer = [Float]()
@@ -754,6 +759,7 @@ actor RadioConnection {
                 ioPending.removeAll()
                 ioSentHz = 0
                 ioNextBurstNs = 0
+                txConfigNextNs = 0
             }
 
             let settingsSnapshot = settings.current
@@ -828,7 +834,7 @@ actor RadioConnection {
                 // (or on the periodic refresh), then ride one write per frame in
                 // the second command slot. A full burst is 6 frames ≈ 16 ms.
                 var ioCommand: (UInt8, UInt8, UInt8, UInt8, UInt8)? = nil
-                if feedIOBoard {
+                if hermesLite {
                     if ioPending.isEmpty, nowNs >= ioNextBurstNs,
                        sendSettings.transmitFrequency != ioSentHz || nowNs >= ioRefreshNs {
                         if ioSentHz == 0 { ioPending.append((HL2IOBoard.regControl, 1)) }
@@ -842,6 +848,12 @@ actor RadioConnection {
                         ioCommand = HL2IOBoard.writeCommand(register: write.register,
                                                             value: write.value,
                                                             mox: transmitting)
+                    } else if nowNs >= txConfigNextNs {
+                        // HL2 TX buffering (addr 0x17): 20 ms PTT hang, 40 ms TX
+                        // buffer latency — the values piHPSDR uses. Refreshed every
+                        // second; a static config register, so re-sends are no-ops.
+                        ioCommand = (0x2E | (transmitting ? 0x01 : 0x00), 0x00, 0x00, 20, 40)
+                        txConfigNextNs = nowNs &+ 1_000_000_000
                     }
                 }
 

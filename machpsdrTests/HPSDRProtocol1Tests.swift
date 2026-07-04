@@ -186,6 +186,46 @@ import Foundation
         #expect(frame[534] == 0x80 && frame[535] == 0x01)
     }
 
+    // MARK: - HL2 N2ADR filter board selection
+
+    @Test func hl2FilterBoardSelectsLPFPerBand() {
+        // Bits 0–5 = LPF for 160 / 80 / 60-40 / 30-20 / 17-15 / 12-10 m;
+        // bit 6 (0x40) = 3 MHz RX high-pass, on for every band except 160 m.
+        #expect(HL2FilterBoard.code(forHz: 1_840_000) == 0x01)          // 160 m, HPF out
+        #expect(HL2FilterBoard.code(forHz: 3_573_000) == 0x42)          // 80 m
+        #expect(HL2FilterBoard.code(forHz: 5_357_000) == 0x44)          // 60 m
+        #expect(HL2FilterBoard.code(forHz: 7_074_000) == 0x44)          // 40 m
+        #expect(HL2FilterBoard.code(forHz: 10_136_000) == 0x48)         // 30 m
+        #expect(HL2FilterBoard.code(forHz: 14_074_000) == 0x48)         // 20 m
+        #expect(HL2FilterBoard.code(forHz: 18_100_000) == 0x50)         // 17 m
+        #expect(HL2FilterBoard.code(forHz: 21_074_000) == 0x50)         // 15 m
+        #expect(HL2FilterBoard.code(forHz: 24_915_000) == 0x60)         // 12 m
+        #expect(HL2FilterBoard.code(forHz: 28_074_000) == 0x60)         // 10 m
+        #expect(HL2FilterBoard.code(forHz: 50_313_000) == 0x40)         // 6 m: bypass
+    }
+
+    @Test func hl2ConfigSlotCarriesFilterCodeNotOCPattern() {
+        var s = RadioSettings()
+        s.hermesLite = true
+        s.transmitFrequency = 14_074_000
+        s.openCollector = 0x33   // amp band-data pattern: must be ignored on HL2
+        // 20 m filter code 0x48 shifted into C2 bits [7:1].
+        #expect(s.commandBytes(slot: 0).2 == 0x48 << 1)
+        s.hermesLite = false
+        #expect(s.commandBytes(slot: 0).2 == 0x33 << 1)   // ANAN: user pattern
+    }
+
+    @Test func hl2DriveSlotSetsPAEnable() {
+        var s = RadioSettings()
+        s.drive = 128
+        #expect(s.commandBytes(slot: 2).2 == 0x00)   // ANAN: no PA bit
+        s.hermesLite = true
+        let c = s.commandBytes(slot: 2)
+        #expect(c.0 == 0x12)
+        #expect(c.1 == 128)
+        #expect(c.2 == 0x08)   // word bit 19: onboard PA on
+    }
+
     // MARK: - HL2 IO board I2C writes
 
     @Test func ioBoardWriteCommandBytes() {

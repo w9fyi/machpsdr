@@ -92,6 +92,12 @@ nonisolated struct RadioSettings {
     var openCollector: UInt8 = 0
     /// RX ADC step attenuator, 0–31 dB (0 = max gain / "preamp"). Sent in the 0x14 command.
     var rxAttenuator: UInt8 = 0
+    /// True when driving a Hermes Lite 2, whose gateware repurposes parts of the
+    /// protocol: the OC bits select the N2ADR filter board's LPF (derived from the
+    /// TX frequency, ignoring `openCollector`), and the drive command must set the
+    /// PA-enable bit (0x09 word bit 19) or the onboard 5 W amplifier stays off and
+    /// nothing reaches the ANT connector on transmit.
+    var hermesLite: Bool = false
 
     /// Number of distinct command "slots" cycled through round-robin:
     /// slot 0 = configuration, slot 1 = TX frequency, slot 2 = drive/mic,
@@ -109,14 +115,21 @@ nonisolated struct RadioSettings {
             // second receiver corrupts the USB-frame sync). Bits 5:3 = (receivers − 1).
             // C2 bits 1–7 = the 7 open-collector outputs (amp band data, etc.).
             let c4 = 0x04 | UInt8((max(receiverCount, 1) - 1) << 3)
-            let c2 = (openCollector & 0x7F) << 1
+            // On the HL2 the OC bits go verbatim to the N2ADR filter board, so they
+            // must carry the LPF selection for the operating frequency, not the
+            // user's amplifier band-data pattern.
+            let oc = hermesLite ? HL2FilterBoard.code(forHz: transmitFrequency)
+                                : openCollector
+            let c2 = (oc & 0x7F) << 1
             return (0x00 | moxBit, sampleRate.rawValue, c2, 0x00, c4)
         case 1:
             // TX NCO frequency: C0 = 0x02, C1–C4 = 32-bit Hz big-endian.
             return Self.frequencyCommand(c0: 0x02 | moxBit, hz: transmitFrequency)
         case 2:
             // Drive level / mic: C0 = 0x12, C1 = TX drive (0–255).
-            return (0x12 | moxBit, drive, 0x00, 0x00, 0x00)
+            // HL2: C2 bit 3 (word bit 19) enables the onboard PA — required for
+            // any transmit power to reach the ANT connector.
+            return (0x12 | moxBit, drive, hermesLite ? 0x08 : 0x00, 0x00, 0x00)
         case 3:
             // RX ADC step attenuator: C0 = 0x14, C4 = enable (0x20) | attenuation (0–31 dB).
             // 0 dB = maximum sensitivity ("preamp"); higher values attenuate the front end.
@@ -136,6 +149,30 @@ nonisolated struct RadioSettings {
          UInt8((hz >> 16) & 0xFF),
          UInt8((hz >> 8) & 0xFF),
          UInt8(hz & 0xFF))
+    }
+}
+
+/// Filter selection for the N2ADR filter board inside a Hermes Lite 2. Unlike the
+/// ANAN boards, the HL2 gateware does no frequency-based filter switching: the seven
+/// "open collector" bits of the config command (C&C 0x00, C2 bits [7:1]) are
+/// forwarded verbatim to the filter board and directly select its filters — bits 0–5
+/// one LPF each (160 / 80 / 60-40 / 30-20 / 17-15 / 12-10 m), bit 6 = 3 MHz receive
+/// high-pass (used on every band except 160 m). The host must derive these bits from
+/// the TX frequency; sending anything else (e.g. an amplifier band-data pattern)
+/// engages the wrong LPF, which silences RX on any band above that filter's cutoff.
+/// With no LPF bit set the board passes the signal unfiltered.
+nonisolated enum HL2FilterBoard {
+    static func code(forHz hz: UInt32) -> UInt8 {
+        let hpf: UInt8 = 0x40
+        switch hz {
+        case ..<2_500_000: return 0x01           // 160 m LPF, broadcast HPF out
+        case ..<4_800_000: return 0x02 | hpf     // 80 m
+        case ..<8_000_000: return 0x04 | hpf     // 60/40 m
+        case ..<15_000_000: return 0x08 | hpf    // 30/20 m
+        case ..<22_000_000: return 0x10 | hpf    // 17/15 m
+        case ..<32_000_000: return 0x20 | hpf    // 12/10 m
+        default: return hpf                      // above 10 m: unfiltered pass-through
+        }
     }
 }
 
