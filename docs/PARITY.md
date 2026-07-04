@@ -133,9 +133,10 @@ CFC (+post-EQ) → bandpass → COMP → aux bandpass → CESSB.
 - ✅ Frequency calibration (PPM) — Settings ▸ Calibration: manual ppm entry plus
   one-click WWV auto-cal (offset-tunes clear of the DC spike, sub-bin parabolic peak
   measurement with SNR gate, tries 10/15/5/20 MHz); persisted, applied to all NCOs at
-  encode time (display stays in true Hz). ⬜ NTP/sample-clock continuous cal (SparkSDR
-  FCal style). HL2 also gets the native −12…+48 dB LNA gain control in place of the
-  ANAN step attenuator
+  encode time (display stays in true Hz). ✅ NTP sample-clock cal (no RF): counts
+  decoded samples against SNTP anchors over 15 min (server picker: Apple/NIST/pool/
+  custom LAN host), gap-aware with auto-restart. HL2 also gets the native −12…+48 dB
+  LNA gain control in place of the ANAN step attenuator
 - ⬜ ADC dither / random toggles `[FW bits, Hermes ADC]`
 - ⬜ PA gain calibration per band (drive→watts)
 - ⬜ Display calibration (grid min/max, per-band waterfall levels)

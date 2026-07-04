@@ -129,6 +129,10 @@ actor RadioConnection {
     /// Input device UID for mic capture (nil = system default). Applied on key-down.
     private var micDeviceUID: String?
 
+    /// Cumulative decoded-sample counter for NTP frequency calibration. `let` +
+    /// Sendable so the session reads it synchronously off-actor.
+    let sampleClock = SampleClockCounter()
+
     /// Per-slice power spectra for the panadapters. `let` + Sendable so the UI reads
     /// them synchronously off-actor. Index by slice number.
     let spectra: [SpectrumBuffer]
@@ -311,6 +315,7 @@ actor RadioConnection {
         dspCommands.clear()   // drop anything queued while disconnected
         let commands = dspCommands
         let socket = socketBox
+        let clock = sampleClock
         // Hermes Lite 2 only: select the N2ADR filter board's LPF from the TX
         // frequency (the HL2 gateware does no filter selection of its own) and keep
         // the N2ADR IO board (if fitted) fed with the TX frequency so its firmware
@@ -321,7 +326,7 @@ actor RadioConnection {
                                     updates: continuation, engines: sliceEngines,
                                     wdspTx: txEngine, transmit: txState,
                                     micRing: micBuffer, commands: commands,
-                                    hermesLite: hermesLite)
+                                    hermesLite: hermesLite, sampleClock: clock)
         }
         thread.name = "RadioConnection.IO"
         thread.stackSize = 512 * 1024
@@ -677,7 +682,8 @@ actor RadioConnection {
                                 transmit: TransmitBox,
                                 micRing: AudioRingBuffer,
                                 commands: DSPCommandQueue,
-                                hermesLite: Bool) {
+                                hermesLite: Bool,
+                                sampleClock: SampleClockCounter) {
         var seqOut: UInt32 = 0
         var slotCounter = 0
 
@@ -775,6 +781,7 @@ actor RadioConnection {
                 ioSentHz = 0
                 ioNextBurstNs = 0
                 txConfigNextNs = 0
+                sampleClock.markDiscontinuity()
             }
 
             let settingsSnapshot = settings.current
@@ -790,6 +797,11 @@ actor RadioConnection {
                                            receiverCount: settingsSnapshot.receiverCount) {
                 packetsInInterval += 1
                 if result.gap { gapsInInterval += 1 }
+                // Sample-clock bookkeeping for NTP calibration: count every decoded
+                // RX0 sample (even while transmitting, when DSP below is skipped).
+                sampleClock.count(result.samples.count / 2,
+                                  rateHz: settingsSnapshot.sampleRate.hertz,
+                                  gap: result.gap)
                 // Empty samples = no USB frame completed this datagram (assembler is
                 // mid-frame or hunting for sync); status would be default-empty then.
                 if !result.samples.isEmpty { lastStatus = result.status }

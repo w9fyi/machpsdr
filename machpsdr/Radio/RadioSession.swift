@@ -191,6 +191,8 @@ final class RadioSession {
     private var consumeTask: Task<Void, Never>?
     /// Live spectrum buffer for the panadapter/waterfall (nil when disconnected).
     private(set) var spectrumBuffer: SpectrumBuffer?
+    /// Live decoded-sample counter for NTP calibration (nil when disconnected).
+    private(set) var sampleClock: SampleClockCounter?
     /// Most recently connected radio, used by the connect/disconnect shortcut.
     private(set) var lastRadio: DiscoveredRadio?
 
@@ -211,6 +213,7 @@ final class RadioSession {
         connection = conn
         spectrumBuffer = conn.spectrum
         sliceSpectra = conn.spectra
+        sampleClock = conn.sampleClock
         let outUID = selectedOutputUID
         consumeTask = Task {
             await conn.setOutputDevice(uid: outUID)
@@ -235,6 +238,8 @@ final class RadioSession {
         connection = nil
         spectrumBuffer = nil
         sliceSpectra = []
+        sampleClock = nil
+        ntpCalTask?.cancel()
         lastUpdate = nil
         isTransmitting = false
         isTuning = false
@@ -618,6 +623,113 @@ final class RadioSession {
         // Require a solid majority of frames to have seen the carrier.
         guard offsets.count >= 10 else { return nil }
         return offsets.sorted()[offsets.count / 2]
+    }
+
+    // MARK: - NTP frequency calibration (no RF required)
+
+    private(set) var ntpCalRunning = false
+    private(set) var ntpCalStatus = ""
+    private var ntpCalTask: Task<Void, Never>?
+    /// Measurement window. Accuracy scales with duration: the NTP time anchors are
+    /// good to a fraction of a millisecond, so 15 min resolves well under 0.1 ppm.
+    private static let ntpCalMinutes = 15
+
+    func startNTPCalibration(host: String) {
+        guard ntpCalTask == nil else { return }
+        ntpCalTask = Task {
+            await runNTPCalibration(host: host)
+            ntpCalTask = nil
+        }
+    }
+
+    func cancelNTPCalibration() {
+        ntpCalTask?.cancel()
+    }
+
+    /// Measures the radio's oscillator error with no RF reference: the sample clock
+    /// and the NCO clock share one TCXO, so counting delivered samples against true
+    /// elapsed time (SNTP anchors at both ends of the window, with the host's
+    /// monotonic-clock rate corrected by the same anchors) yields the error in ppm
+    /// directly. A stream discontinuity (lost datagrams, rate change, reconnect)
+    /// invalidates the window; the measurement restarts up to twice.
+    private func runNTPCalibration(host: String) async {
+        guard !ntpCalRunning, !autoCalRunning else { return }
+        guard isConnected, let clock = sampleClock else {
+            ntpCalStatus = "Connect to a radio first."
+            return
+        }
+        ntpCalRunning = true
+        defer { ntpCalRunning = false }
+
+        ntpCalStatus = "Querying \(host)…"
+        guard let start = await SNTP.mapping(host: host) else {
+            ntpCalStatus = "NTP server \(host) is unreachable."
+            return
+        }
+
+        for attempt in 1...3 {
+            let s1 = clock.snapshot
+            let m1 = SNTP.monotonicNow()
+            guard s1.rateHz > 0 else {
+                ntpCalStatus = "No sample stream — is the radio streaming?"
+                return
+            }
+
+            var interrupted = false
+            for minute in 1...Self.ntpCalMinutes {
+                do { try await Task.sleep(for: .seconds(60)) } catch {
+                    ntpCalStatus = "NTP calibration cancelled."
+                    return
+                }
+                if clock.snapshot.discontinuities != s1.discontinuities {
+                    interrupted = true
+                    break
+                }
+                ntpCalStatus = "Measuring against \(host)… \(minute)/\(Self.ntpCalMinutes) min"
+            }
+            if interrupted {
+                if attempt < 3 {
+                    ntpCalStatus = "Stream interrupted — restarting measurement (attempt \(attempt + 1) of 3)…"
+                    continue
+                }
+                ntpCalStatus = "Stream interrupted repeatedly; calibration abandoned."
+                return
+            }
+
+            let s2 = clock.snapshot
+            let m2 = SNTP.monotonicNow()
+            ntpCalStatus = "Querying \(host)…"
+            guard let end = await SNTP.mapping(host: host) else {
+                ntpCalStatus = "NTP server \(host) stopped answering."
+                return
+            }
+            guard s2.discontinuities == s1.discontinuities, s2.rateHz == s1.rateHz else {
+                ntpCalStatus = "Stream changed during the final measurement; calibration abandoned."
+                return
+            }
+
+            // Host monotonic-clock rate vs NTP over the same window, then the
+            // radio's sample rate against NTP-true elapsed seconds.
+            let hostScale = (end.ntp - start.ntp) / (end.monotonic - start.monotonic)
+            guard abs(hostScale - 1) < 100e-6 else {
+                ntpCalStatus = "Implausible NTP timing (host clock off by >100 ppm); check the server."
+                return
+            }
+            let trueElapsed = (m2 - m1) * hostScale
+            let measuredRate = Double(s2.samples - s1.samples) / trueElapsed
+            let ppm = (measuredRate / Double(s1.rateHz) - 1) * 1_000_000
+            guard abs(ppm) < 20 else {
+                ntpCalStatus = String(format: "Implausible result (%+.1f ppm); calibration abandoned.", ppm)
+                return
+            }
+            // The sample stream is unaffected by the NCO correction, so this is the
+            // absolute clock error — it replaces the current value outright.
+            let rounded = (ppm * 100).rounded() / 100
+            setFrequencyPPM(rounded)
+            ntpCalStatus = String(format: "NTP: sample clock %+.2f ppm vs %@ over %d min — applied.",
+                                  rounded, host, Self.ntpCalMinutes)
+            return
+        }
     }
 
     private var driveByte: UInt8 { UInt8(max(0, min(255, driveLevel / 100 * 255))) }

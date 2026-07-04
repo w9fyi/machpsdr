@@ -21,9 +21,25 @@ struct SettingsView: View {
 }
 
 /// Frequency (ppm) calibration: manual correction entry plus one-click automatic
-/// calibration against WWV's atomic-clock carriers.
+/// calibration against WWV's atomic-clock carriers, and an RF-free NTP method
+/// that measures the sample clock against an NTP server over ~15 minutes.
 struct CalibrationSettingsView: View {
     @Environment(RadioSession.self) private var session
+    @AppStorage("ntpServer") private var ntpServer = "time.apple.com"
+    @AppStorage("ntpCustomHost") private var ntpCustomHost = ""
+
+    /// Preset servers plus a custom entry. The tag is the hostname itself so the
+    /// stored value survives changes to the preset list.
+    private static let presets: [(name: String, host: String)] = [
+        ("Apple (time.apple.com)", "time.apple.com"),
+        ("NIST (time.nist.gov)", "time.nist.gov"),
+        ("NTP Pool (pool.ntp.org)", "pool.ntp.org"),
+    ]
+
+    private var isCustom: Bool { !Self.presets.contains { $0.host == ntpServer } }
+    private var activeHost: String {
+        isCustom ? ntpCustomHost.trimmingCharacters(in: .whitespaces) : ntpServer
+    }
 
     var body: some View {
         Form {
@@ -62,6 +78,44 @@ struct CalibrationSettingsView: View {
                         .font(.caption)
                 }
                 Text("Measures the WWV atomic-clock carrier (trying 10, 15, 5, then 20 MHz), computes the clock error, and applies the correction — about 10 seconds, then your frequency is restored. Requires a connected radio and WWV propagation; accuracy is best at the 48 kHz sample rate.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("NTP Calibration (no RF)") {
+                Picker("NTP server", selection: $ntpServer) {
+                    ForEach(Self.presets, id: \.host) { preset in
+                        Text(preset.name).tag(preset.host)
+                    }
+                    Text("Custom…").tag("custom")
+                }
+                if isCustom {
+                    HStack {
+                        Text("Host or IP")
+                        Spacer()
+                        TextField("192.168.1.10", text: $ntpCustomHost)
+                            .frame(width: 200)
+                            .multilineTextAlignment(.trailing)
+                            .autocorrectionDisabled()
+                    }
+                }
+                if session.ntpCalRunning {
+                    HStack {
+                        ProgressView().controlSize(.small)
+                        Text("Measuring…")
+                        Spacer()
+                        Button("Cancel") { session.cancelNTPCalibration() }
+                    }
+                } else {
+                    Button("Calibrate via NTP (~15 min)") {
+                        session.startNTPCalibration(host: activeHost)
+                    }
+                    .disabled(!session.isConnected || activeHost.isEmpty || session.autoCalRunning)
+                }
+                if !session.ntpCalStatus.isEmpty {
+                    Text(session.ntpCalStatus)
+                        .font(.caption)
+                }
+                Text("Needs no receivable signal: counts the radio's samples against NTP time for 15 minutes and computes the clock error from the rate difference. Keep the radio connected and avoid changing the sample rate or slice count during the run (tuning and operating are fine). A LAN NTP server gives the best accuracy.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
