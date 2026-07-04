@@ -13,8 +13,60 @@ struct SettingsView: View {
                 .tabItem { Label("Band Data", systemImage: "fibrechannel") }
             CATSettingsView()
                 .tabItem { Label("CAT", systemImage: "network") }
+            CalibrationSettingsView()
+                .tabItem { Label("Calibration", systemImage: "tuningfork") }
         }
         .frame(width: 480, height: 500)
+    }
+}
+
+/// Frequency (ppm) calibration: manual correction entry plus one-click automatic
+/// calibration against WWV's atomic-clock carriers.
+struct CalibrationSettingsView: View {
+    @Environment(RadioSession.self) private var session
+
+    var body: some View {
+        Form {
+            Section("Frequency Correction") {
+                HStack {
+                    Text("Clock error")
+                    Spacer()
+                    TextField("ppm", value: Binding(
+                        get: { session.frequencyPPM },
+                        set: { session.setFrequencyPPM($0) }
+                    ), format: .number.precision(.fractionLength(0...2)))
+                    .frame(width: 80)
+                    .multilineTextAlignment(.trailing)
+                    Text("ppm").foregroundStyle(.secondary)
+                }
+                Text("Corrects the radio's oscillator error; applies to all tuning immediately and persists across launches. To set it manually, tune a reference carrier (WWV at 10 MHz) and adjust until it is centered — positive values when a known carrier appears below its true frequency.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("Auto Calibration") {
+                Button {
+                    Task { await session.runAutoCalibration() }
+                } label: {
+                    if session.autoCalRunning {
+                        HStack {
+                            ProgressView().controlSize(.small)
+                            Text("Calibrating…")
+                        }
+                    } else {
+                        Text("Auto Calibrate on WWV")
+                    }
+                }
+                .disabled(!session.isConnected || session.autoCalRunning)
+                if !session.autoCalStatus.isEmpty {
+                    Text(session.autoCalStatus)
+                        .font(.caption)
+                }
+                Text("Measures the WWV atomic-clock carrier (trying 10, 15, 5, then 20 MHz), computes the clock error, and applies the correction — about 10 seconds, then your frequency is restored. Requires a connected radio and WWV propagation; accuracy is best at the 48 kHz sample rate.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 

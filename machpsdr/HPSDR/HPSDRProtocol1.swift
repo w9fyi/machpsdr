@@ -92,6 +92,12 @@ nonisolated struct RadioSettings {
     var openCollector: UInt8 = 0
     /// RX ADC step attenuator, 0–31 dB (0 = max gain / "preamp"). Sent in the 0x14 command.
     var rxAttenuator: UInt8 = 0
+    /// HL2 only: AD9866 LNA gain in dB, −12…+48 (extended-mode 0x14 command).
+    /// +19 dB matches the legacy "0 dB attenuation" level, so it is the parity default.
+    var rxLNAGain: Int = 19
+    /// Radio clock error in ppm (positive = radio's TCXO runs high). NCO frequencies
+    /// are pre-divided by (1 + ppm/1e6) so the radio lands on the displayed frequency.
+    var frequencyCalibrationPPM: Double = 0
     /// True when driving a Hermes Lite 2, whose gateware repurposes parts of the
     /// protocol: the OC bits select the N2ADR filter board's LPF (derived from the
     /// TX frequency, ignoring `openCollector`), and the drive command must set the
@@ -124,7 +130,7 @@ nonisolated struct RadioSettings {
             return (0x00 | moxBit, sampleRate.rawValue, c2, 0x00, c4)
         case 1:
             // TX NCO frequency: C0 = 0x02, C1–C4 = 32-bit Hz big-endian.
-            return Self.frequencyCommand(c0: 0x02 | moxBit, hz: transmitFrequency)
+            return Self.frequencyCommand(c0: 0x02 | moxBit, hz: calibrated(transmitFrequency))
         case 2:
             // Drive level / mic: C0 = 0x12, C1 = TX drive (0–255).
             // HL2: C2 bit 3 (word bit 19) enables the onboard PA — required for
@@ -133,14 +139,29 @@ nonisolated struct RadioSettings {
         case 3:
             // RX ADC step attenuator: C0 = 0x14, C4 = enable (0x20) | attenuation (0–31 dB).
             // 0 dB = maximum sensitivity ("preamp"); higher values attenuate the front end.
+            // HL2: bit 6 selects the extended AD9866 gain mode, C4 [5:0] = gain + 12,
+            // giving the full −12…+48 dB LNA range instead of the legacy attenuator.
+            if hermesLite {
+                let gain = UInt8(clamping: max(0, min(60, rxLNAGain + 12)))
+                return (0x14 | moxBit, 0x00, 0x00, 0x00, 0x40 | gain)
+            }
             return (0x14 | moxBit, 0x00, 0x00, 0x00, 0x20 | (rxAttenuator & 0x1F))
         default:
             // RX NCO frequency: C0 = 0x04 + receiverIndex*2.
             let rx = slot - 4
             let c0 = UInt8(0x04 + rx * 2) | moxBit
             let hz = rx < receiverFrequencies.count ? receiverFrequencies[rx] : (receiverFrequencies.first ?? 0)
-            return Self.frequencyCommand(c0: c0, hz: hz)
+            return Self.frequencyCommand(c0: c0, hz: calibrated(hz))
         }
+    }
+
+    /// Applies the ppm clock correction to an NCO frequency: the radio scales every
+    /// NCO by its actual/nominal clock ratio, so dividing here makes it land on the
+    /// displayed frequency. Display values elsewhere (spectrum centers, band and
+    /// filter selection) stay in true Hz.
+    private func calibrated(_ hz: UInt32) -> UInt32 {
+        guard frequencyCalibrationPPM != 0 else { return hz }
+        return UInt32((Double(hz) / (1 + frequencyCalibrationPPM / 1_000_000)).rounded())
     }
 
     private static func frequencyCommand(c0: UInt8, hz: UInt32) -> (UInt8, UInt8, UInt8, UInt8, UInt8) {

@@ -62,6 +62,8 @@ final class RadioSession {
     var agcMode = 3                     // 0 off, 1 long, 2 slow, 3 medium, 4 fast
     var agcThreshold = 90.0             // AGC-T (max gain, dB)
     var rxAttenuator = 0                // RX ADC step attenuator, 0-31 dB (0 = preamp)
+    var rxLNAGain = 19                  // HL2 LNA gain, -12…+48 dB (persisted)
+    var frequencyPPM: Double = 0        // radio clock error, ppm (persisted)
     var cwPitch: Double = 600
     var filterWidth: Double = 250
     var filterLow: Double = 150
@@ -135,6 +137,12 @@ final class RadioSession {
            let rate = HPSDRProtocol1.SampleRate(rawValue: UInt8(clamping: defaults.integer(forKey: "sampleRate"))) {
             sampleRate = rate
         }
+        if defaults.object(forKey: "rxLNAGain") != nil {
+            rxLNAGain = max(-12, min(48, defaults.integer(forKey: "rxLNAGain")))
+        }
+        if defaults.object(forKey: "frequencyPPM") != nil {
+            frequencyPPM = max(-100, min(100, defaults.double(forKey: "frequencyPPM")))
+        }
         if let data = defaults.data(forKey: "manualNotches"),
            let saved = try? JSONDecoder().decode([ManualNotch].self, from: data) {
             manualNotches = saved
@@ -197,6 +205,8 @@ final class RadioSession {
         settings.receiverCount = activeSliceCount
         settings.receiverFrequencies = [frequencyHz] + extraSlices.map { $0.frequencyHz }
         settings.transmitFrequency = frequencyHz
+        settings.rxLNAGain = rxLNAGain
+        settings.frequencyCalibrationPPM = frequencyPPM
         let conn = RadioConnection(radio: radio, settings: settings)
         connection = conn
         spectrumBuffer = conn.spectrum
@@ -505,6 +515,109 @@ final class RadioSession {
         rxAttenuator = db
         let conn = connection
         Task { await conn?.setRXAttenuator(UInt8(db)) }
+    }
+
+    /// True when the current/most recent radio is a Hermes Lite 2, which has an
+    /// LNA gain control (−12…+48 dB) in place of the ANAN step attenuator.
+    var isHermesLite: Bool { lastRadio?.board == .hermesLite }
+
+    func setRXLNAGain(_ db: Int) {
+        let clamped = max(-12, min(48, db))
+        rxLNAGain = clamped
+        UserDefaults.standard.set(clamped, forKey: "rxLNAGain")
+        let conn = connection
+        Task { await conn?.setRXLNAGain(clamped) }
+    }
+
+    /// Radio clock error in ppm. Takes effect immediately, so it can be adjusted
+    /// live against a reference carrier (e.g. WWV) until it is centered.
+    func setFrequencyPPM(_ ppm: Double) {
+        let clamped = max(-100, min(100, ppm))
+        frequencyPPM = clamped
+        UserDefaults.standard.set(clamped, forKey: "frequencyPPM")
+        let conn = connection
+        Task { await conn?.setFrequencyCalibration(ppm: clamped) }
+    }
+
+    // MARK: - Automatic frequency calibration (WWV)
+
+    private(set) var autoCalRunning = false
+    private(set) var autoCalStatus = ""
+
+    /// One-click calibration against WWV's atomic-clock carriers: tunes so the
+    /// carrier sits 8 kHz above the panadapter center (clear of the DC spike),
+    /// measures its offset from true over ~3 s of spectrum frames, converts to ppm,
+    /// applies the correction, and restores the previous frequency. Tries 10, 15,
+    /// 5, then 20 MHz until a carrier passes the SNR gate.
+    func runAutoCalibration() async {
+        guard !autoCalRunning else { return }
+        guard isConnected, let spectrum = spectrumBuffer else {
+            autoCalStatus = "Connect to a radio first."
+            return
+        }
+        autoCalRunning = true
+        let returnHz = frequencyHz
+        defer {
+            setFrequency(returnHz)
+            autoCalRunning = false
+        }
+
+        for carrier in [10e6, 15e6, 5e6, 20e6] {
+            autoCalStatus = "Measuring WWV \(Int(carrier / 1e6)) MHz…"
+            let center = UInt32(carrier - 8_000)
+            setFrequency(center)
+            do { try await Task.sleep(for: .seconds(1.5)) } catch { return }
+            guard let offset = await measureCarrierOffset(carrier: carrier, centerHz: center,
+                                                          spectrum: spectrum) else { continue }
+            // Measured with the current correction applied, so the offset is the
+            // residual clock error: carrier below true = clock high = raise ppm.
+            let residual = -offset / carrier * 1_000_000
+            let total = ((frequencyPPM + residual) * 100).rounded() / 100
+            setFrequencyPPM(total)
+            autoCalStatus = String(format: "WWV %.0f MHz: carrier off %+.1f Hz → %+.2f ppm applied (total %+.2f ppm)",
+                                   carrier / 1e6, offset, residual, total)
+            return
+        }
+        autoCalStatus = "No usable WWV carrier (10/15/5/20 MHz). Try when propagation supports WWV, or calibrate manually."
+    }
+
+    /// Polls the spectrum for ~3 s and returns the median offset (Hz) of the
+    /// strongest peak near `carrier` from its true frequency, or nil if the
+    /// carrier never stands ≥12 dB above the surrounding noise.
+    private func measureCarrierOffset(carrier: Double, centerHz: UInt32,
+                                      spectrum: SpectrumBuffer) async -> Double? {
+        var offsets: [Double] = []
+        var lastGeneration: UInt64 = 0
+        for _ in 0..<30 {
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return nil }
+            guard let frame = spectrum.latest(),
+                  frame.generation != lastGeneration,
+                  frame.centerHz == centerHz,
+                  frame.data.count > 16 else { continue }
+            lastGeneration = frame.generation
+            let count = frame.data.count
+            let binHz = Double(frame.spanHz) / Double(count)
+            let expectedIndex = Double(count) / 2 + (carrier - Double(centerHz)) / binHz
+            let halfWindow = max(300.0 / binHz, 4)
+            let lo = max(1, Int(expectedIndex - halfWindow))
+            let hi = min(count - 2, Int(expectedIndex + halfWindow))
+            guard lo < hi else { continue }
+            var peak = lo
+            for i in lo...hi where frame.data[i] > frame.data[peak] { peak = i }
+            let median = frame.data[lo...hi].sorted()[(hi - lo) / 2]
+            guard frame.data[peak] - median >= 12 else { continue }
+            // Parabolic interpolation over the peak's dB values for sub-bin accuracy.
+            let y1 = Double(frame.data[peak - 1])
+            let y2 = Double(frame.data[peak])
+            let y3 = Double(frame.data[peak + 1])
+            let denom = y1 - 2 * y2 + y3
+            let delta = denom != 0 ? 0.5 * (y1 - y3) / denom : 0
+            let peakHz = Double(centerHz) + (Double(peak) + delta - Double(count) / 2) * binHz
+            offsets.append(peakHz - carrier)
+        }
+        // Require a solid majority of frames to have seen the carrier.
+        guard offsets.count >= 10 else { return nil }
+        return offsets.sorted()[offsets.count / 2]
     }
 
     private var driveByte: UInt8 { UInt8(max(0, min(255, driveLevel / 100 * 255))) }

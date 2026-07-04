@@ -26,18 +26,34 @@ struct AGCSectionView: View {
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
         }
-        HStack {
-            Text("RX Atten")
-            Slider(value: Binding(
-                get: { Double(session.rxAttenuator) },
-                set: { session.setRXAttenuator(Int($0)) }
-            ), in: 0...31, step: 1)
-            Text("\(session.rxAttenuator) dB")
-                .monospacedDigit()
+        if session.isHermesLite {
+            HStack {
+                Text("RX Gain")
+                Slider(value: Binding(
+                    get: { Double(session.rxLNAGain) },
+                    set: { session.setRXLNAGain(Int($0)) }
+                ), in: -12...48, step: 1)
+                Text("\(session.rxLNAGain) dB")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            Text("Hermes Lite LNA gain: raise toward +48 dB for quiet high bands, lower toward −12 dB to tame strong signals or noise on the low bands. +19 dB is a good starting point.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else {
+            HStack {
+                Text("RX Atten")
+                Slider(value: Binding(
+                    get: { Double(session.rxAttenuator) },
+                    set: { session.setRXAttenuator(Int($0)) }
+                ), in: 0...31, step: 1)
+                Text("\(session.rxAttenuator) dB")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            Text("RX Atten 0 dB = maximum gain (preamp) for quiet bands like 20 m; raise it to tame strong signals or noise on the low bands.")
+                .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        Text("RX Atten 0 dB = maximum gain (preamp) for quiet bands like 20 m; raise it to tame strong signals or noise on the low bands.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
     }
 }

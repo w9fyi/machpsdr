@@ -524,6 +524,21 @@ actor RadioConnection {
         settingsBox.current = s
     }
 
+    /// HL2 LNA gain (−12…+48 dB). Applied on the next command frame.
+    func setRXLNAGain(_ db: Int) {
+        var s = settingsBox.current
+        s.rxLNAGain = db
+        settingsBox.current = s
+    }
+
+    /// Radio clock error in ppm; NCO frequencies are corrected on the next command
+    /// frames, so adjusting this live re-centers a reference carrier immediately.
+    func setFrequencyCalibration(ppm: Double) {
+        var s = settingsBox.current
+        s.frequencyCalibrationPPM = ppm
+        settingsBox.current = s
+    }
+
     /// Noise reduction controls (RXA DSP), per slice. Applied live; restored on reconnect.
     func setSpectralNR(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setSpectralNR(on) } }
     func setSpectralNRGainMethod(_ method: Int, slice: Int = 0) { runOnSlice(slice) { $0.setSpectralNRGainMethod(method) } }

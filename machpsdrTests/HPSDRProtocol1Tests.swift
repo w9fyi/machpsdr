@@ -215,6 +215,45 @@ import Foundation
         #expect(s.commandBytes(slot: 0).2 == 0x33 << 1)   // ANAN: user pattern
     }
 
+    @Test func hl2GainSlotUsesExtendedLNAMode() {
+        var s = RadioSettings()
+        s.rxAttenuator = 10          // must be ignored on HL2
+        s.hermesLite = true
+        s.rxLNAGain = 48
+        #expect(s.commandBytes(slot: 3).4 == 0x40 | 60)   // +48 dB → code 60
+        s.rxLNAGain = -12
+        #expect(s.commandBytes(slot: 3).4 == 0x40)        // −12 dB → code 0
+        s.rxLNAGain = 19
+        #expect(s.commandBytes(slot: 3).4 == 0x40 | 31)   // parity default
+        s.hermesLite = false
+        #expect(s.commandBytes(slot: 3).4 == 0x20 | 10)   // ANAN: legacy attenuator
+    }
+
+    // MARK: - Frequency calibration (ppm)
+
+    @Test func frequencyCalibrationScalesNCO() {
+        var s = RadioSettings()
+        s.transmitFrequency = 14_074_000
+        s.receiverFrequencies = [14_074_000]
+        s.frequencyCalibrationPPM = 10   // radio clock 10 ppm high → send lower NCO
+        // 14074000 / (1 + 1e-5) ≈ 14073859.26 → 14073859 = 0xD6C007
+        let tx = s.commandBytes(slot: 1)
+        let sent = (UInt32(tx.1) << 24) | (UInt32(tx.2) << 16) | (UInt32(tx.3) << 8) | UInt32(tx.4)
+        #expect(sent == 14_073_859)
+        // RX slot gets the same correction.
+        let rx = s.commandBytes(slot: 4)
+        let sentRx = (UInt32(rx.1) << 24) | (UInt32(rx.2) << 16) | (UInt32(rx.3) << 8) | UInt32(rx.4)
+        #expect(sentRx == 14_073_859)
+    }
+
+    @Test func frequencyCalibrationZeroIsExact() {
+        var s = RadioSettings()
+        s.transmitFrequency = 14_074_000
+        let tx = s.commandBytes(slot: 1)
+        let sent = (UInt32(tx.1) << 24) | (UInt32(tx.2) << 16) | (UInt32(tx.3) << 8) | UInt32(tx.4)
+        #expect(sent == 14_074_000)
+    }
+
     @Test func hl2DriveSlotSetsPAEnable() {
         var s = RadioSettings()
         s.drive = 128
