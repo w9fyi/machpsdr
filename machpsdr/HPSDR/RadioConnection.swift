@@ -582,6 +582,7 @@ actor RadioConnection {
     func setSpectralNRArtifactReduction(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setSpectralNRArtifactReduction(on) } }
     func setANR(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setANR(on) } }
     func setANRStrength(_ taps: Int, slice: Int = 0) { runOnSlice(slice, key: "anrTaps") { $0.setANRStrength(taps) } }
+    func setNR3(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setNR3(on) } }
     func setANF(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setANF(on) } }
     func setNoiseBlanker(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setNoiseBlanker(on) } }
     func setNoiseBlankerThreshold(_ threshold: Double, slice: Int = 0) { runOnSlice(slice, key: "nbThresh") { $0.setNoiseBlankerThreshold(threshold) } }

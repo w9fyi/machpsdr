@@ -51,6 +51,11 @@ struct NoiseReductionSectionView: View {
             get: { session.autoNotch },
             set: { session.setAutoNotch($0) }
         ))
+        Toggle("NR3 (RNNoise)", isOn: Binding(
+            get: { session.nr3 },
+            set: { session.setNR3($0) }
+        ))
+        .accessibilityHint("Neural denoiser trained on HF ham-radio noise.")
         Toggle("Spectral NB (SNB)", isOn: Binding(
             get: { session.snb },
             set: { session.setSNB($0) }

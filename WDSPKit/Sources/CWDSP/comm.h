@@ -92,6 +92,7 @@ warren@wpratt.com
 #include "patchpanel.h"
 #include "resample.h"
 #include "rmatch.h"
+#include "rnnr.h"
 #include "RXA.h"
 #include "sender.h"
 #include "shift.h"

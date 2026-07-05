@@ -34,6 +34,7 @@ final class RadioSession {
     var spectralNRArtifact = true       // EMNR artifact (musical-noise) reduction
     var lmsNR = false                   // ANR (LMS)
     var lmsNRStrength = 64              // ANR LMS filter taps (strength)
+    var nr3 = false                     // NR3: RNNoise neural denoiser
     var autoNotch = false               // ANF auto-notch
     // Front-end noise blankers (impulse/static)
     var noiseBlanker = false            // ANB
@@ -354,6 +355,12 @@ final class RadioSession {
         lmsNRStrength = taps
         let conn = connection
         Task { await conn?.setANRStrength(taps) }
+    }
+
+    func setNR3(_ on: Bool) {
+        nr3 = on
+        let conn = connection
+        Task { await conn?.setNR3(on) }
     }
 
     func setAutoNotch(_ on: Bool) {
@@ -1002,6 +1009,7 @@ final class RadioSession {
         let snrArt = spectralNRArtifact
         let anr = lmsNR
         let anrStrength = lmsNRStrength
+        let nr3On = nr3
         let anf = autoNotch
         let nb = noiseBlanker
         let nbThresh = noiseBlankerThreshold
@@ -1055,6 +1063,7 @@ final class RadioSession {
             await conn?.setSpectralNR(snr)
             await conn?.setANRStrength(anrStrength)
             await conn?.setANR(anr)
+            await conn?.setNR3(nr3On)
             await conn?.setANF(anf)
             await conn?.setNoiseBlankerThreshold(nbThresh)
             await conn?.setNoiseBlanker(nb)

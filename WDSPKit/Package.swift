@@ -16,13 +16,22 @@ let package = Package(
             name: "CWDSP",
             cSettings: [
                 // FFTW headers (Homebrew). `-w` silences the library's own warnings.
-                .unsafeFlags(["-I/opt/homebrew/include", "-w"]),
+                // RNNoise headers back the NR3 (RNNoise) filter in rnnr.c, vendored
+                // from ThirdParty/rnnoise with our HF-radio-retrained weights baked in.
+                .unsafeFlags([
+                    "-I/opt/homebrew/include",
+                    "-I/Users/justinmann/Desktop/devprojects/machpsdr/ThirdParty/rnnoise/include",
+                    "-w"
+                ]),
                 .define("_GNU_SOURCE")
             ],
             linkerSettings: [
                 // Statically link double-precision FFTW (WDSP uses the `fftw_` API)
-                // so nothing external is needed at runtime.
-                .unsafeFlags(["/opt/homebrew/lib/libfftw3.a"])
+                // and RNNoise (NR3) so nothing external is needed at runtime.
+                .unsafeFlags([
+                    "/opt/homebrew/lib/libfftw3.a",
+                    "/Users/justinmann/Desktop/devprojects/machpsdr/ThirdParty/rnnoise/lib/librnnoise.a"
+                ])
             ]
         )
     ]

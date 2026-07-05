@@ -99,6 +99,12 @@ extern void SetRXAEMNRaeRun (int channel, int run);
 extern void SetRXASNBARun (int channel, int run);
 extern void SetRXAANFRun(int channel, int run);
 
+// NR3 (RNNoise, HF-radio-retrained model baked in as default)
+extern void SetRXARNNRRun (int channel, int run);
+extern void SetRXARNNRPosition (int channel, int position);
+extern void SetRXARNNRUseDefaultGain (int channel, int use_default_gain);
+extern void RNNRloadModel (const char *file_path);
+
 extern void SetRXAShiftRun (int channel, int run);
 extern void SetRXAShiftFreq (int channel, double fshift);
 

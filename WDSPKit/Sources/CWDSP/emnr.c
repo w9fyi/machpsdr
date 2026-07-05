@@ -896,8 +896,8 @@ void SetRXAEMNRRun (int channel, int run)
 	EMNR a = rxa[channel].emnr.p;
 	if (a->run != run)
 	{
-		RXAbp1Check (channel, rxa[channel].amd.p->run, rxa[channel].snba.p->run, 
-			run, rxa[channel].anf.p->run, rxa[channel].anr.p->run);
+		RXAbp1Check (channel, rxa[channel].amd.p->run, rxa[channel].snba.p->run,
+			run, rxa[channel].anf.p->run, rxa[channel].anr.p->run, rxa[channel].rnnr.p->run);
 		EnterCriticalSection (&ch[channel].csDSP);
 		a->run = run;
 		RXAbp1Set (channel);

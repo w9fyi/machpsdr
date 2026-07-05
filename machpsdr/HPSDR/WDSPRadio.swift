@@ -141,6 +141,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private var emnrArtifact = true          // artifact (musical-noise) elimination
     private var anrOn = false
     private var anrTaps: Int32 = 64          // ANR LMS filter length (strength)
+    private var rnnrOn = false               // NR3: RNNoise neural denoiser
     private var anfOn = false
 
     // Front-end noise blankers (EXT): ANB (NB) and NOB (NB2). Run on the complex I/Q
@@ -312,6 +313,12 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         if isOpen { SetRXAANRVals(channelID, anrTaps, 16, 0.0001, 0.1) }
     }
 
+    /// NR3: RNNoise neural denoiser (HF-radio-retrained model baked in).
+    func setNR3(_ on: Bool) {
+        rnnrOn = on
+        if isOpen { SetRXARNNRRun(channelID, on ? 1 : 0) }
+    }
+
     /// ANF: automatic notch filter (removes steady carriers/heterodynes).
     func setANF(_ on: Bool) {
         anfOn = on
@@ -468,6 +475,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         SetRXAEMNRRun(channelID, emnrOn ? 1 : 0)
         SetRXAANRVals(channelID, anrTaps, 16, 0.0001, 0.1)
         SetRXAANRRun(channelID, anrOn ? 1 : 0)
+        SetRXARNNRRun(channelID, rnnrOn ? 1 : 0)
         SetRXAANFRun(channelID, anfOn ? 1 : 0)
     }
 

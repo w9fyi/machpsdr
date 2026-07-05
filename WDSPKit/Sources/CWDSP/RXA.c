@@ -331,6 +331,15 @@ void create_rxa (int channel)
 		0,												// npe_method
 		1);												// ae_run
 
+	// RNNR (NR3)
+	rxa[channel].rnnr.p = create_rnnr (
+		0,												// run - OFF by default
+		0,												// position
+		ch[channel].dsp_size,							// buffer size
+		rxa[channel].midbuff,							// pointer to input buffer
+		rxa[channel].midbuff,							// pointer to output buffer
+		ch[channel].dsp_rate);							// samplerate
+
 	// AGC
 	rxa[channel].agc.p = create_wcpagc (
 		1,												// run
@@ -484,6 +493,7 @@ void destroy_rxa (int channel)
 	destroy_meter (rxa[channel].agcmeter.p);
 	destroy_wcpagc (rxa[channel].agc.p);
 	destroy_emnr (rxa[channel].emnr.p);
+	destroy_rnnr (rxa[channel].rnnr.p);
 	destroy_anr (rxa[channel].anr.p);
 	destroy_anf (rxa[channel].anf.p);
 	destroy_eqp (rxa[channel].eqp.p);
@@ -561,11 +571,13 @@ void xrxa (int channel)
 	xanf (rxa[channel].anf.p, 0);
 	xanr (rxa[channel].anr.p, 0);
 	xemnr (rxa[channel].emnr.p, 0);
+	xrnnr (rxa[channel].rnnr.p, 0);
 	xbandpass (rxa[channel].bp1.p, 0);
 	xwcpagc (rxa[channel].agc.p);
 	xanf (rxa[channel].anf.p, 1);
 	xanr (rxa[channel].anr.p, 1);
 	xemnr (rxa[channel].emnr.p, 1);
+	xrnnr (rxa[channel].rnnr.p, 1);
 	xbandpass (rxa[channel].bp1.p, 1);
 	xmeter (rxa[channel].agcmeter.p);
 	xsiphon (rxa[channel].sip1.p, 0);
@@ -635,6 +647,7 @@ void setDSPSamplerate_rxa (int channel)
 	setSamplerate_anf (rxa[channel].anf.p, ch[channel].dsp_rate);
 	setSamplerate_anr (rxa[channel].anr.p, ch[channel].dsp_rate);
 	setSamplerate_emnr (rxa[channel].emnr.p, ch[channel].dsp_rate);
+	setSamplerate_rnnr (rxa[channel].rnnr.p, ch[channel].dsp_rate);
 	setSamplerate_bandpass (rxa[channel].bp1.p, ch[channel].dsp_rate);
 	setSamplerate_wcpagc (rxa[channel].agc.p, ch[channel].dsp_rate);
 	setSamplerate_meter (rxa[channel].agcmeter.p, ch[channel].dsp_rate);
@@ -695,6 +708,8 @@ void setDSPBuffsize_rxa (int channel)
 	setSize_anr (rxa[channel].anr.p, ch[channel].dsp_size);
 	setBuffers_emnr (rxa[channel].emnr.p, rxa[channel].midbuff, rxa[channel].midbuff);
 	setSize_emnr (rxa[channel].emnr.p, ch[channel].dsp_size);
+	setBuffers_rnnr (rxa[channel].rnnr.p, rxa[channel].midbuff, rxa[channel].midbuff);
+	setSize_rnnr (rxa[channel].rnnr.p, ch[channel].dsp_size);
 	setBuffers_bandpass (rxa[channel].bp1.p, rxa[channel].midbuff, rxa[channel].midbuff);
 	setSize_bandpass (rxa[channel].bp1.p, ch[channel].dsp_size);
 	setBuffers_wcpagc (rxa[channel].agc.p, rxa[channel].midbuff, rxa[channel].midbuff);
@@ -729,8 +744,8 @@ void SetRXAMode (int channel, int mode)
 	{
 		int amd_run = (mode == RXA_AM) || (mode == RXA_SAM);
 		RXAbpsnbaCheck (channel, mode, rxa[channel].ndb.p->master_run);
-		RXAbp1Check (channel, amd_run, rxa[channel].snba.p->run, rxa[channel].emnr.p->run, 
-			rxa[channel].anf.p->run, rxa[channel].anr.p->run);
+		RXAbp1Check (channel, amd_run, rxa[channel].snba.p->run, rxa[channel].emnr.p->run,
+			rxa[channel].anf.p->run, rxa[channel].anr.p->run, rxa[channel].rnnr.p->run);
 		EnterCriticalSection (&ch[channel].csDSP);
 		rxa[channel].mode = mode;
 		rxa[channel].amd.p->run  = 0;
@@ -774,8 +789,8 @@ void RXAResCheck (int channel)
 	else												a->run = 0;
 }
 
-void RXAbp1Check (int channel, int amd_run, int snba_run, 
-	int emnr_run, int anf_run, int anr_run)
+void RXAbp1Check (int channel, int amd_run, int snba_run,
+	int emnr_run, int anf_run, int anr_run, int rnnr_run)
 {
 	BANDPASS a = rxa[channel].bp1.p;
 	double gain;
@@ -783,7 +798,8 @@ void RXAbp1Check (int channel, int amd_run, int snba_run,
 		snba_run ||
 		emnr_run ||
 		anf_run  ||
-		anr_run)	gain = 2.0;
+		anr_run  ||
+		rnnr_run)	gain = 2.0;
 	else			gain = 1.0;
 	if (a->gain != gain)
 		setGain_bandpass (a, gain, 0);
@@ -797,7 +813,8 @@ void RXAbp1Set (int channel)
 		(rxa[channel].snba.p->run == 1) ||
 		(rxa[channel].emnr.p->run == 1) ||
 		(rxa[channel].anf.p->run  == 1) ||
-		(rxa[channel].anr.p->run  == 1))	a->run = 1;
+		(rxa[channel].anr.p->run  == 1) ||
+		(rxa[channel].rnnr.p->run == 1))	a->run = 1;
 	else									a->run = 0;
 	if (!old && a->run) flush_bandpass (a);
 	setUpdate_fircore (a->p);
