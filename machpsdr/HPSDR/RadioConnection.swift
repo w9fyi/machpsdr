@@ -737,7 +737,7 @@ actor RadioConnection {
         // TX I/Q buffering: WDSP produces 1024-sample blocks; each EP2 frame needs 126.
         var txBuffer = [Float]()
         var txPos = 0
-        let txSilence = [Float](repeating: 0, count: WDSPTransmit.bufferSize)
+        var micBlock = [Float](repeating: 0, count: WDSPTransmit.bufferSize)
 
         // Tune carrier oscillator (synthesized directly for a steady, glitch-free tone).
         var tunePhase = 0.0
@@ -936,14 +936,13 @@ actor RadioConnection {
                     // mid-transmit can't spin this loop forever.
                     let digitalTX = transmit.digital
                     while running.get(), txBuffer.count - txPos < 252 {
-                        var mic = txSilence
-                        _ = mic.withUnsafeMutableBufferPointer {
+                        _ = micBlock.withUnsafeMutableBufferPointer {
                             (digitalTX ? digitalRing : micRing)
                                 .read(into: $0.baseAddress!, count: WDSPTransmit.bufferSize)
                         }
                         // Digital audio is rendered at its final level; mic gain
                         // must not shape it.
-                        let block = wdspTx.processBlock(mic: mic, gainOverride: digitalTX ? 1.0 : nil)
+                        let block = wdspTx.processBlock(mic: micBlock, gainOverride: digitalTX ? 1.0 : nil)
                         if block.isEmpty { break }
                         txBuffer.append(contentsOf: block)
                     }

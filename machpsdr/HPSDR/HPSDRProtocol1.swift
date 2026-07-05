@@ -457,6 +457,10 @@ nonisolated final class EP6Assembler {
         let rxCount = max(receiverCount, 1)
         var out = Output(sequence: sequence,
                          receivers: [[Float]](repeating: [], count: rxCount))
+        let bytesPerGroup = 6 * rxCount + 2
+        let sampleAreaSize = HPSDRProtocol1.usbFrameSize - HPSDRProtocol1.usbHeaderSize
+        let groupCount = sampleAreaSize / bytesPerGroup
+        for rx in 0..<rxCount { out.receivers[rx].reserveCapacity(groupCount * 4) }
         if let expected = expectedSequence, sequence != expected {
             // Lost datagram(s): the byte offsets shifted, so the partial frame is
             // unusable. Drop it; the sync hunt below re-locks on the next frame.
@@ -542,7 +546,6 @@ nonisolated final class EP6Assembler {
         let sampleAreaSize = HPSDRProtocol1.usbFrameSize - HPSDRProtocol1.usbHeaderSize
         let groupCount = sampleAreaSize / bytesPerGroup
         let scale: Float = 1.0 / 8_388_608.0 // 2^23
-        for rx in 0..<rxCount { out.receivers[rx].reserveCapacity(groupCount * 2) }
         for group in 0..<groupCount {
             let groupBase = HPSDRProtocol1.usbHeaderSize + group * bytesPerGroup
             for rx in 0..<rxCount {
