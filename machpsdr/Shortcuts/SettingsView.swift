@@ -15,6 +15,8 @@ struct SettingsView: View {
                 .tabItem { Label("CAT", systemImage: "network") }
             CalibrationSettingsView()
                 .tabItem { Label("Calibration", systemImage: "tuningfork") }
+            StationSettingsView()
+                .tabItem { Label("Station", systemImage: "person.crop.circle") }
         }
         .frame(width: 480, height: 500)
     }

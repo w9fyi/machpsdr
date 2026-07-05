@@ -204,12 +204,14 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
 
     /// Processes exactly `bufferSize` mono mic samples (pad with zeros for tune)
     /// into interleaved TX I/Q Floats. Returns an empty array if not open.
-    func processBlock(mic: [Float]) -> [Float] {
+    /// `gainOverride` replaces the user's mic gain (digital modes render audio
+    /// at its final level).
+    func processBlock(mic: [Float], gainOverride: Double? = nil) -> [Float] {
         guard isOpen else { return [] }
         // Real lane (stride 2) gets the mic with gain; the imaginary lane is zeroed at
         // init and never written, so it stays zero.
         let n = min(mic.count, Self.bufferSize)
-        var gain = micGain
+        var gain = gainOverride ?? micGain
         if n > 0 {
             vDSP_vspdp(mic, 1, &inBuffer, 2, vDSP_Length(n))
             vDSP_vsmulD(inBuffer, 2, &gain, &inBuffer, 2, vDSP_Length(n))

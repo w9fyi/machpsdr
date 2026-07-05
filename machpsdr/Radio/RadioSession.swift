@@ -748,6 +748,40 @@ final class RadioSession {
         Task { await conn?.setTune(on) }
     }
 
+    // MARK: - FT8 / digital mode support
+
+    /// Attach (or detach with nil) the FT8 decoder's tap on slice 0 audio.
+    /// Returns `false` (without scheduling the tap) if there is no live connection to attach to.
+    @discardableResult
+    func ft8SetAudioTap(_ ring: AudioRingBuffer?) -> Bool {
+        let conn = connection
+        guard conn != nil else { return false }
+        Task { await conn?.setAudioTap(ring) }
+        return true
+    }
+
+    /// Key the transmitter with a pre-rendered 48 kHz digital-mode waveform.
+    /// The microphone stays closed; call `ft8StopTransmit()` to un-key.
+    func ft8StartTransmit(_ samples: [Float]) {
+        isTuning = false
+        isTransmitting = true
+        let conn = connection
+        Task { await conn?.startDigitalTransmit(samples: samples) }
+    }
+
+    /// Un-key a digital-mode transmission.
+    func ft8StopTransmit() {
+        isTransmitting = false
+        let conn = connection
+        Task { await conn?.stopDigitalTransmit() }
+    }
+
+    /// Widen the TX passband for digital tones (FT8 audio runs 200-3000 Hz).
+    func ft8SetTXBandwidth(low: Double, high: Double) {
+        let conn = connection
+        Task { await conn?.setTXBandwidth(low: low, high: high) }
+    }
+
     func setDrive(_ percent: Double) {
         driveLevel = percent
         UserDefaults.standard.set(percent, forKey: "driveLevel")

@@ -109,6 +109,10 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private let ring: AudioRingBuffer
     private var isOpen = false
 
+    /// Optional secondary sink for demodulated audio (FT8 decoder tap).
+    /// Set and read on the I/O thread via the DSP command queue.
+    var tapRing: AudioRingBuffer?
+
     private var inBuffer: [Double]
     private var outBuffer: [Double]
     private var fill = 0
@@ -520,6 +524,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
                     // WDSP output is interleaved stereo; take the left lane (mono path).
                     vDSP_vdpsp(outBuffer, 2, &audioScratch, 1, vDSP_Length(Self.bufferSize))
                     ring.write(audioScratch)
+                    tapRing?.write(audioScratch)
                     fill = 0
                 }
             }

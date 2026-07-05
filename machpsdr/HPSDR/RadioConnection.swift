@@ -125,6 +125,9 @@ actor RadioConnection {
     private let wdspTx = WDSPTransmit()
     private let transmit = TransmitBox()
     private let micRing = AudioRingBuffer()
+    // Digital-mode (FT8/FT4) TX audio: the whole transmission is pre-rendered and
+    // loaded at key-down, so the ring must hold a full FT8 waveform (12.64 s @ 48 kHz).
+    private let digitalTXRing = AudioRingBuffer(capacity: 768_000)
     private var audioInput: AudioInput?
     /// Input device UID for mic capture (nil = system default). Applied on key-down.
     private var micDeviceUID: String?
@@ -312,6 +315,7 @@ actor RadioConnection {
         let txEngine = wdspTx
         let txState = transmit
         let micBuffer = micRing
+        let digitalBuffer = digitalTXRing
         dspCommands.clear()   // drop anything queued while disconnected
         let commands = dspCommands
         let socket = socketBox
@@ -325,7 +329,8 @@ actor RadioConnection {
             RadioConnection.runLoop(socket: socket, settings: box, running: flag,
                                     updates: continuation, engines: sliceEngines,
                                     wdspTx: txEngine, transmit: txState,
-                                    micRing: micBuffer, commands: commands,
+                                    micRing: micBuffer, digitalRing: digitalBuffer,
+                                    commands: commands,
                                     hermesLite: hermesLite, sampleClock: clock)
         }
         thread.name = "RadioConnection.IO"
@@ -420,6 +425,32 @@ actor RadioConnection {
     func setTune(_ on: Bool) {
         transmit.tune = on
         transmit.transmitting = on
+    }
+
+    /// Attaches (or detaches, with nil) a secondary ring that receives the
+    /// slice's demodulated 48 kHz mono audio — the FT8/FT4 decoder tap.
+    func setAudioTap(_ ring: AudioRingBuffer?, slice: Int = 0) {
+        guard engines.indices.contains(slice) else { return }
+        let engines = self.engines
+        dsp { engines[slice].wdsp.tapRing = ring }
+    }
+
+    /// Keys the transmitter with a pre-rendered digital-mode waveform (48 kHz
+    /// mono audio, e.g. FT8 GFSK tones). The mic is not opened; the waveform
+    /// plays once and the caller un-keys via `stopDigitalTransmit()`.
+    func startDigitalTransmit(samples: [Float]) {
+        transmit.tune = false
+        digitalTXRing.clear()
+        digitalTXRing.write(samples)
+        transmit.digital = true
+        transmit.transmitting = true
+    }
+
+    /// Un-keys a digital-mode transmission and drops any unplayed samples.
+    func stopDigitalTransmit() {
+        transmit.digital = false
+        if !transmit.tune { transmit.transmitting = false }
+        digitalTXRing.clear()
     }
 
     /// Sets the TX drive level (0–255).
@@ -681,6 +712,7 @@ actor RadioConnection {
                                 wdspTx: WDSPTransmit,
                                 transmit: TransmitBox,
                                 micRing: AudioRingBuffer,
+                                digitalRing: AudioRingBuffer,
                                 commands: DSPCommandQueue,
                                 hermesLite: Bool,
                                 sampleClock: SampleClockCounter) {
@@ -897,15 +929,20 @@ actor RadioConnection {
                                         slot1: slotCounter % slots, slot2: (slotCounter + 1) % slots,
                                         txIQ: tuneFrame, command2: ioCommand)
                 } else if transmitting {
-                    // Voice transmit: feed microphone audio through WDSP TXA. Guard the
-                    // refill on `running` and on an empty block so a teardown that closes
-                    // the TXA channel mid-transmit can't spin this loop forever.
+                    // Voice/digital transmit: feed mic (or pre-rendered digital-mode)
+                    // audio through WDSP TXA. Guard the refill on `running` and on an
+                    // empty block so a teardown that closes the TXA channel
+                    // mid-transmit can't spin this loop forever.
+                    let digitalTX = transmit.digital
                     while running.get(), txBuffer.count - txPos < 252 {
                         var mic = txSilence
                         _ = mic.withUnsafeMutableBufferPointer {
-                            micRing.read(into: $0.baseAddress!, count: WDSPTransmit.bufferSize)
+                            (digitalTX ? digitalRing : micRing)
+                                .read(into: $0.baseAddress!, count: WDSPTransmit.bufferSize)
                         }
-                        let block = wdspTx.processBlock(mic: mic)
+                        // Digital audio is rendered at its final level; mic gain
+                        // must not shape it.
+                        let block = wdspTx.processBlock(mic: mic, gainOverride: digitalTX ? 1.0 : nil)
                         if block.isEmpty { break }
                         txBuffer.append(contentsOf: block)
                     }
@@ -1076,10 +1113,16 @@ private nonisolated final class TransmitBox: @unchecked Sendable {
     private var lock = os_unfair_lock()
     private var _transmitting = false
     private var _tune = false
+    private var _digital = false
     private var _drive: UInt8 = 0
     var transmitting: Bool {
         get { os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }; return _transmitting }
         set { os_unfair_lock_lock(&lock); _transmitting = newValue; os_unfair_lock_unlock(&lock) }
+    }
+    /// True while TX audio comes from the digital-mode ring instead of the mic.
+    var digital: Bool {
+        get { os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }; return _digital }
+        set { os_unfair_lock_lock(&lock); _digital = newValue; os_unfair_lock_unlock(&lock) }
     }
     var tune: Bool {
         get { os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }; return _tune }

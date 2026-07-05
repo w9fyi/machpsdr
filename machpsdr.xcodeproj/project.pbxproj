@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		7F8CA0AF2FF3228D003092CB /* CWDSP in Frameworks */ = {isa = PBXBuildFile; productRef = 7F8CA0AE2FF3228D003092CB /* CWDSP */; };
+		F8000000000000000000A001 /* FT8Kit in Frameworks */ = {isa = PBXBuildFile; productRef = F8000000000000000000A002 /* FT8Kit */; };
+		F8000000000000000000A003 /* FT8Kit in Frameworks */ = {isa = PBXBuildFile; productRef = F8000000000000000000A004 /* FT8Kit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -43,11 +45,13 @@
 			isa = PBXFrameworksBuildPhase;
 			files = (
 				7F8CA0AF2FF3228D003092CB /* CWDSP in Frameworks */,
+				F8000000000000000000A001 /* FT8Kit in Frameworks */,
 			);
 		};
 		000000000000000230000000 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
+				F8000000000000000000A003 /* FT8Kit in Frameworks */,
 			);
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -90,6 +94,7 @@
 			name = machpsdr;
 			packageProductDependencies = (
 				7F8CA0AE2FF3228D003092CB /* CWDSP */,
+				F8000000000000000000A002 /* FT8Kit */,
 			);
 			productName = machpsdr;
 			productReference = 000000000000000000000120 /* machpsdr.app */;
@@ -112,6 +117,9 @@
 				000000000000000000000011 /* machpsdrTests */,
 			);
 			name = machpsdrTests;
+			packageProductDependencies = (
+				F8000000000000000000A004 /* FT8Kit */,
+			);
 			productName = machpsdrTests;
 			productReference = 000000000000000000000121 /* machpsdrTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
@@ -146,6 +154,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				7F8CA0AD2FF3228D003092CB /* XCLocalSwiftPackageReference "WDSPKit" */,
+				F8000000000000000000A005 /* XCLocalSwiftPackageReference "FT8Kit" */,
 			);
 			preferredProjectObjectVersion = 90;
 			productRefGroup = 000000000000000000000020 /* Products */;
@@ -499,12 +508,24 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = WDSPKit;
 		};
+		F8000000000000000000A005 /* XCLocalSwiftPackageReference "FT8Kit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = FT8Kit;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		7F8CA0AE2FF3228D003092CB /* CWDSP */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = CWDSP;
+		};
+		F8000000000000000000A002 /* FT8Kit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FT8Kit;
+		};
+		F8000000000000000000A004 /* FT8Kit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FT8Kit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

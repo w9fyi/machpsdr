@@ -60,6 +60,9 @@ struct RadioDetailView: View {
                     Section("TX Processing") {
                         TXProcessingSectionView(session: session)
                     }
+                    Section("FT8 / FT4") {
+                        FT8SectionView(session: session)
+                    }
                     Section("Live Stream") {
                         LiveStatusSectionView(session: session)
                     }
