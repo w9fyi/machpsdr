@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Tuning section rows: frequency entry, sample rate, mode, mode-appropriate
-/// filter controls, and volume/mute. The frequency field keeps a local `@State`
+/// Tuning section rows: focused-slice frequency entry, sample rate, mode, filters,
+/// volume/mute, and MIDI tuning step. The frequency field keeps a local `@State`
 /// edit buffer synced from the model, so live re-renders can't clobber typing.
 struct TuningSectionView: View {
     @Bindable var session: RadioSession
@@ -9,21 +9,28 @@ struct TuningSectionView: View {
     /// Frequency shown in the text field, in MHz.
     @State private var frequencyMHz: Double = 7.1
 
+    private var focusedSlice: Int { session.focusedSliceIndex }
+
     var body: some View {
         HStack {
             Text("Frequency")
             Spacer()
+            Text(RadioSession.sliceName(for: focusedSlice))
+                .foregroundStyle(.secondary)
             TextField("MHz", value: $frequencyMHz, format: .number.precision(.fractionLength(6)))
                 .frame(width: 120)
                 .multilineTextAlignment(.trailing)
-                .onSubmit { session.setFrequency(UInt32((frequencyMHz * 1_000_000).rounded())) }
+                .onSubmit {
+                    session.setFrequency(UInt32((frequencyMHz * 1_000_000).rounded()), forSlice: focusedSlice)
+                }
             Text("MHz").foregroundStyle(.secondary)
         }
-        // Keep the frequency field in sync with MIDI/click tuning.
-        .onChange(of: session.frequencyHz) { _, newValue in
+        .onChange(of: session.frequency(forSlice: focusedSlice)) { _, newValue in
             frequencyMHz = Double(newValue) / 1_000_000
         }
-        .onAppear { frequencyMHz = Double(session.frequencyHz) / 1_000_000 }
+        .onChange(of: focusedSlice) { _, _ in syncFrequencyField() }
+        .onAppear { syncFrequencyField() }
+
         Picker("Sample Rate", selection: Binding(
             get: { session.sampleRate },
             set: { session.setSampleRate($0) }
@@ -32,38 +39,52 @@ struct TuningSectionView: View {
                 Text("\(rate.hertz / 1000) kHz").tag(rate)
             }
         }
-        // Default (pop-up menu) picker style — avoids the VoiceOver focus trap
+        // Default (pop-up menu) picker style avoids the VoiceOver focus trap
         // that the segmented style caused in the mode selector.
         Picker("Mode", selection: Binding(
-            get: { session.mode },
-            set: { session.setMode($0) }
+            get: { session.mode(forSlice: focusedSlice) },
+            set: { session.setMode($0, forSlice: focusedSlice) }
         )) {
             ForEach(RadioMode.allCases) { mode in
                 Text(mode.rawValue).tag(mode)
             }
         }
-        filterControls
+        if focusedSlice == 0 {
+            RXFilterControlsView(session: session)
+        } else {
+            Text("Slice filters follow the receiver mode; full RX filter shaping is available on Slice A.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
         HStack {
             Button {
-                session.setMute(!session.muted)
+                if focusedSlice == 0 { session.setMute(!session.muted) }
             } label: {
-                Image(systemName: session.muted ? "speaker.slash.fill" : "speaker.fill")
-                    .foregroundStyle(session.muted ? .red : .primary)
+                Image(systemName: session.muted && focusedSlice == 0 ? "speaker.slash.fill" : "speaker.fill")
+                    .foregroundStyle(session.muted && focusedSlice == 0 ? .red : .primary)
             }
             .buttonStyle(.borderless)
+            .disabled(focusedSlice != 0)
             .accessibilityLabel(session.muted ? "Unmute" : "Mute")
             Slider(value: Binding(
-                get: { Double(session.volume) },
-                set: { session.setVolume(Float($0)) }
+                get: { Double(session.volume(forSlice: focusedSlice)) },
+                set: { session.setVolume(Float($0), forSlice: focusedSlice) }
             ), in: 0...1)
             Image(systemName: "speaker.wave.3.fill")
         }
+        MIDITuningStepSectionView(session: session)
     }
 
-    /// Mode-appropriate filter controls: CW pitch+width, SSB/DIGI low+high cut,
-    /// or a single bandwidth for AM/SAM/FM.
-    @ViewBuilder
-    private var filterControls: some View {
+    private func syncFrequencyField() {
+        frequencyMHz = Double(session.frequency(forSlice: focusedSlice)) / 1_000_000
+    }
+}
+
+/// Mode-appropriate RX filter controls for the main receiver.
+struct RXFilterControlsView: View {
+    @Bindable var session: RadioSession
+
+    var body: some View {
         switch session.mode.filterStyle {
         case .cw:
             labeledSlider("CW Pitch", value: session.cwPitch, range: 300...1000) { session.setCWPitch($0) }

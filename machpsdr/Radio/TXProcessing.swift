@@ -2,7 +2,7 @@ import Foundation
 
 /// Transmit audio processing presets. Higher tiers compress harder for more talk
 /// power; DX+ also enables CESSB (controlled-envelope SSB) for maximum average power.
-nonisolated enum TXProcessing: String, CaseIterable, Identifiable, Sendable {
+nonisolated enum TXProcessing: String, CaseIterable, Identifiable, Sendable, Codable {
     case off = "Off"
     case normal = "Normal"
     case dx = "DX"

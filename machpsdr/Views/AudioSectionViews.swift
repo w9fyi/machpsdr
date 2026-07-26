@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// One ±12 dB EQ band row (shared by the TX and RX equalizers).
+/// One +/-12 dB EQ band row (shared by the TX and RX equalizers).
 private struct EQSliderRow: View {
     let label: String
     let value: Int
@@ -15,6 +15,75 @@ private struct EQSliderRow: View {
             ), in: -12...12, step: 1)
             Text("\(value > 0 ? "+" : "")\(value) dB")
                 .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private enum FilterTarget: String, CaseIterable, Identifiable {
+    case tx = "TX"
+    case rx = "RX"
+
+    var id: String { rawValue }
+}
+
+/// Popover content for RX/TX passband controls.
+struct FilterSettingsPanelView: View {
+    @Bindable var session: RadioSession
+    @State private var target: FilterTarget = .tx
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("Filter", selection: $target) {
+                ForEach(FilterTarget.allCases) { target in
+                    Text(target.rawValue).tag(target)
+                }
+            }
+            .pickerStyle(.radioGroup)
+
+            Divider()
+
+            switch target {
+            case .tx:
+                txFilterControls
+            case .rx:
+                if session.focusedSliceIndex == 0 {
+                    RXFilterControlsView(session: session)
+                } else {
+                    Text("Slice filters follow the receiver mode; full RX filter shaping is available on Slice A.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding()
+        .frame(width: 360)
+    }
+
+    private var txFilterControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("TX Low")
+                Slider(value: Binding(
+                    get: { session.txLowCut },
+                    set: { session.setTXLowCut($0) }
+                ), in: 0...1000, step: 10)
+                Text("\(Int(session.txLowCut)) Hz")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("TX High")
+                Slider(value: Binding(
+                    get: { session.txHighCut },
+                    set: { session.setTXHighCut($0) }
+                ), in: 2000...4000, step: 50)
+                Text("\(Int(session.txHighCut)) Hz")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            Text("Narrow for punch and DX; wider for ESSB ragchew audio.")
+                .font(.caption)
                 .foregroundStyle(.secondary)
         }
     }
@@ -38,34 +107,11 @@ struct RXEqualizerSectionView: View {
     }
 }
 
-/// TX passband (low/high cut), the 3-band transmit equalizer, and processing presets.
+/// TX equalizer and processing presets.
 struct TXAudioSectionView: View {
     @Bindable var session: RadioSession
 
     var body: some View {
-        HStack {
-            Text("TX Low")
-            Slider(value: Binding(
-                get: { session.txLowCut },
-                set: { session.setTXLowCut($0) }
-            ), in: 0...1000, step: 10)
-            Text("\(Int(session.txLowCut)) Hz")
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-        }
-        HStack {
-            Text("TX High")
-            Slider(value: Binding(
-                get: { session.txHighCut },
-                set: { session.setTXHighCut($0) }
-            ), in: 2000...4000, step: 50)
-            Text("\(Int(session.txHighCut)) Hz")
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-        }
-        Text("Narrow (e.g. 100–2800 Hz) for punch and DX; wider for ESSB ragchew audio.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
         Toggle("TX Equalizer", isOn: Binding(
             get: { session.txEQ },
             set: { session.setTXEQ($0) }

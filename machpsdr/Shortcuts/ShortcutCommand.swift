@@ -7,7 +7,7 @@ nonisolated struct ShortcutCommand: Identifiable, Hashable {
     let category: String
     let name: String
 
-    /// All assignable commands: every band, every mode, plus common actions.
+    /// All assignable commands: every band, every mode, slice focus, plus common actions.
     static let all: [ShortcutCommand] = {
         var commands: [ShortcutCommand] = []
         for band in Band.all {
@@ -15,6 +15,9 @@ nonisolated struct ShortcutCommand: Identifiable, Hashable {
         }
         for mode in RadioMode.allCases {
             commands.append(ShortcutCommand(id: "mode.\(mode.rawValue)", category: "Mode", name: mode.rawValue))
+        }
+        for index in 0..<10 {
+            commands.append(ShortcutCommand(id: "slice.\(index)", category: "Slice", name: "Focus \(sliceName(for: index))"))
         }
         commands.append(contentsOf: [
             ShortcutCommand(id: "tune.up",            category: "Action", name: "Tune Up"),
@@ -35,9 +38,15 @@ nonisolated struct ShortcutCommand: Identifiable, Hashable {
     }()
 
     /// Categories in display order.
-    static let categories = ["Band", "Mode", "Action"]
+    static let categories = ["Band", "Mode", "Slice", "Action"]
 
     static func name(for id: String) -> String {
         all.first { $0.id == id }?.name ?? id
+    }
+
+    private static func sliceName(for index: Int) -> String {
+        let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        if letters.indices.contains(index) { return "Slice \(letters[index])" }
+        return "Slice \(index + 1)"
     }
 }

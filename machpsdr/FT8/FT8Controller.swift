@@ -96,6 +96,17 @@ struct FT8LoggedQSO: Identifiable, Sendable {
     private var tapRing: AudioRingBuffer?
     private(set) var workedCalls: Set<String> = []
 
+    private struct RadioRestorePoint {
+        let frequencyHz: UInt32
+        let mode: RadioMode
+        let cwPitch: Double
+        let filterWidth: Double
+        let filterLow: Double
+        let filterHigh: Double
+    }
+
+    private var radioRestorePoint: RadioRestorePoint?
+
     /// Slot parity (slotIndex % 2) we transmit on; nil = not yet chosen.
     private var txParity: Int?
     private var pendingTxText: String?
@@ -193,6 +204,7 @@ struct FT8LoggedQSO: Identifiable, Sendable {
     /// Tune the radio to the FT8/FT4 channel and start decoding.
     func start() {
         guard !isRunning, canStart else { return }
+        captureRadioRestorePointIfNeeded()
         isRunning = true
         decodes.removeAll()
         incomingCallers.removeAll()
@@ -205,22 +217,27 @@ struct FT8LoggedQSO: Identifiable, Sendable {
             isRunning = false
             tapRing = nil
             statusText = "Radio disconnected before FT8 could start."
+            restoreRadioIfNeeded()
             return
         }
 
         let worker = FT8SlotWorker(
             mode: mode, ring: ring,
             onSlotStart: { [weak self] slot in
-                Task { @MainActor in self?.slotDidStart(slot) }
+                Task { @MainActor [weak self] in self?.slotDidStart(slot) }
             },
             onDecodes: { [weak self] slot, start, results in
-                Task { @MainActor in self?.slotDidDecode(slot, slotStart: start, results: results) }
+                Task { @MainActor [weak self] in self?.slotDidDecode(slot, slotStart: start, results: results) }
             })
         self.worker = worker
         worker.start()
     }
 
     func stop() {
+        stop(restoreRadio: true)
+    }
+
+    private func stop(restoreRadio: Bool) {
         guard isRunning else { return }
         isRunning = false
         haltTransmissions()
@@ -230,17 +247,41 @@ struct FT8LoggedQSO: Identifiable, Sendable {
         session.ft8SetAudioTap(nil)
         tapRing = nil
         statusText = "Stopped"
+        if restoreRadio { restoreRadioIfNeeded() }
     }
 
     private func restart() {
         guard isRunning else { return }
-        stop()
+        stop(restoreRadio: false)
         start()
     }
 
     private func retuneIfRunning() {
         guard isRunning else { return }
         tuneRadio()
+    }
+
+    private func captureRadioRestorePointIfNeeded() {
+        guard radioRestorePoint == nil else { return }
+        radioRestorePoint = RadioRestorePoint(
+            frequencyHz: session.frequencyHz,
+            mode: session.mode,
+            cwPitch: session.cwPitch,
+            filterWidth: session.filterWidth,
+            filterLow: session.filterLow,
+            filterHigh: session.filterHigh
+        )
+    }
+
+    private func restoreRadioIfNeeded() {
+        guard let restorePoint = radioRestorePoint else { return }
+        radioRestorePoint = nil
+        session.setFrequency(restorePoint.frequencyHz)
+        session.setMode(restorePoint.mode)
+        session.setCWPitch(restorePoint.cwPitch)
+        session.setFilterWidth(restorePoint.filterWidth)
+        session.setLowCut(restorePoint.filterLow)
+        session.setHighCut(restorePoint.filterHigh)
     }
 
     private func tuneRadio() {

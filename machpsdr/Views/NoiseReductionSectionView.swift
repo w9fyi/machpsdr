@@ -18,6 +18,7 @@ struct NoiseReductionSectionView: View {
                 Text("Linear").tag(0)
                 Text("Log").tag(1)
                 Text("Gamma").tag(2)
+                Text("Trained").tag(3)
             }
             Picker("Noise Estimate", selection: Binding(
                 get: { session.spectralNRNPEMethod },
@@ -25,11 +26,31 @@ struct NoiseReductionSectionView: View {
             )) {
                 Text("OSMS").tag(0)
                 Text("MMSE").tag(1)
+                Text("NSTAT").tag(2)
             }
             Toggle("Reduce Artifacts", isOn: Binding(
                 get: { session.spectralNRArtifact },
                 set: { session.setSpectralNRArtifact($0) }
             ))
+            Toggle("Psychoacoustic Post", isOn: Binding(
+                get: { session.spectralNRPost },
+                set: { session.setSpectralNRPost($0) }
+            ))
+            .accessibilityHint("Masks residual musical noise under shaped comfort noise.")
+            if session.spectralNRPost {
+                HStack {
+                    Text("Post Strength")
+                    Slider(value: Binding(
+                        get: { session.spectralNRPostFactor },
+                        set: { session.setSpectralNRPostFactor($0) }
+                    ), in: 0...0.5, step: 0.01)
+                    .accessibilityLabel("Psychoacoustic post-processing strength")
+                    .accessibilityValue(String(format: "%.2f", session.spectralNRPostFactor))
+                    Text(String(format: "%.2f", session.spectralNRPostFactor))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
         Toggle("LMS NR (NR)", isOn: Binding(
             get: { session.lmsNR },

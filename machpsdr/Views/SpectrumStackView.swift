@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Stacked per-slice panadapter/waterfall displays. Clicking a display tunes
-/// that slice's receiver (the main VFO for RX1, the slice VFO otherwise).
+/// that slice's receiver (the main VFO for Slice A, the slice VFO otherwise).
 struct SpectrumStackView: View {
     @Bindable var session: RadioSession
 
@@ -10,20 +10,17 @@ struct SpectrumStackView: View {
             ForEach(session.sliceIndices, id: \.self) { idx in
                 if idx < session.sliceSpectra.count {
                     SpectrumView(spectrum: session.sliceSpectra[idx]) { hz in
-                        if idx == 0 {
-                            session.setFrequency(hz)
-                        } else {
-                            session.setSliceFrequency(idx, hz)
-                        }
+                        session.setFocusedSlice(idx)
+                        session.setFrequency(hz, forSlice: idx)
                     }
                     .frame(minHeight: session.activeSliceCount > 1 ? 150 : 260)
                     .overlay(alignment: .topLeading) {
-                        Text("RX\(idx + 1)")
+                        Text(RadioSession.sliceName(for: idx))
                             .font(.caption2.bold().monospacedDigit())
                             .padding(.horizontal, 4)
                             .padding(.vertical, 1)
                             .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
-                            .foregroundStyle(idx == 0 ? .green : .cyan)
+                            .foregroundStyle(session.focusedSliceIndex == idx ? .green : .cyan)
                             .padding(4)
                     }
                 }

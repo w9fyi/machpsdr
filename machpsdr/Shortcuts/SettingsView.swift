@@ -9,6 +9,8 @@ struct SettingsView: View {
                 .tabItem { Label("Shortcuts", systemImage: "keyboard") }
             AudioSettingsView()
                 .tabItem { Label("Audio", systemImage: "mic") }
+            MIDISettingsView()
+                .tabItem { Label("MIDI", systemImage: "pianokeys") }
             BandDataSettingsView()
                 .tabItem { Label("Band Data", systemImage: "fibrechannel") }
             CATSettingsView()

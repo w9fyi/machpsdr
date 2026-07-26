@@ -1,9 +1,8 @@
 import SwiftUI
 
 /// A compact VFO row for one extra receive slice. The frequency uses a local `@State`
-/// edit buffer that only syncs from the model on an explicit change — so the ~10×/sec
-/// live-status re-renders can't clobber in-progress typing (the bug where a typed
-/// slice frequency reverted to the slice's previous value).
+/// edit buffer that only syncs from the model on an explicit change, so live-status
+/// re-renders can't clobber in-progress typing.
 private struct SliceRowView: View {
     let slice: SliceInfo
     @Bindable var session: RadioSession
@@ -11,7 +10,21 @@ private struct SliceRowView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("RX\(slice.id + 1)").font(.headline).foregroundStyle(.cyan)
+            HStack {
+                Button(RadioSession.sliceName(for: slice.id)) {
+                    session.setFocusedSlice(slice.id)
+                }
+                .buttonStyle(.borderless)
+                .font(.headline)
+                .foregroundStyle(session.focusedSliceIndex == slice.id ? Color.accentColor : Color.cyan)
+                .disabled(session.isTransmitting || session.isTuning)
+                Spacer()
+                if session.focusedSliceIndex == slice.id {
+                    Label("Focused", systemImage: "scope")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             HStack {
                 Text("Freq")
                 TextField("MHz", value: $mhz, format: .number.precision(.fractionLength(6)))
@@ -60,16 +73,19 @@ private struct SliceRowView: View {
     }
 }
 
-/// Multi-receiver controls: a stepper for the number of slices, plus a compact
-/// VFO (frequency, mode, volume, pan) for each extra slice beyond the main RX1.
+/// Multi-receiver controls: focus summary plus compact VFO rows for extra slices.
 struct SlicesSectionView: View {
     @Bindable var session: RadioSession
 
     var body: some View {
-        Stepper("Slices: \(session.activeSliceCount)",
-                onIncrement: { session.addSlice() },
-                onDecrement: { session.removeSlice() })
-        Text("RX1 (above) is the main receiver with full controls. Extra slices are independent receivers sharing the antenna — give each its own frequency and pan it left/right in the stereo mix.")
+        HStack {
+            Text("Active Slices")
+            Spacer()
+            Text("\(session.activeSliceCount)")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        Text("Use the toolbar to add slices or focus Slice A/B/C. Extra slices are independent receivers sharing the antenna, each with its own frequency and stereo pan.")
             .font(.caption)
             .foregroundStyle(.secondary)
         ForEach(session.extraSlices) { slice in

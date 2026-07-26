@@ -16,17 +16,40 @@ final class MIDIManager {
         let text: String
     }
 
+    struct ControlChange: Equatable {
+        let channel: UInt8
+        let number: UInt8
+    }
+
     private(set) var log: [LogEntry] = []
     private(set) var sourceNames: [String] = []
     private(set) var isRunning = false
+    private(set) var lastControlChange: ControlChange?
 
     /// Control Change number treated as the VFO tuning encoder.
-    var tuningCC: UInt8 = 100
-    /// Called with a signed number of detents (+ = up, − = down) when the knob turns.
+    private(set) var tuningCC: UInt8
+    /// Called with a signed number of detents (+ = up, - = down) when the knob turns.
     var onTuneStep: ((Int) -> Void)?
 
+    private let defaultsKey = "midiTuningCC"
     private var client = MIDIClientRef()
     private var inputPort = MIDIPortRef()
+
+    init() {
+        let saved = UserDefaults.standard.object(forKey: defaultsKey) == nil ? 100 : UserDefaults.standard.integer(forKey: defaultsKey)
+        tuningCC = UInt8(clamping: saved)
+    }
+
+    func setTuningCC(_ cc: UInt8) {
+        tuningCC = cc
+        UserDefaults.standard.set(Int(cc), forKey: defaultsKey)
+        append("Tuning CC set to #\(cc)")
+    }
+
+    func learnTuningCCFromLastMessage() {
+        guard let lastControlChange else { return }
+        setTuningCC(lastControlChange.number)
+    }
 
     /// Creates the MIDI client/port and connects to every current source.
     func start() {
@@ -114,10 +137,13 @@ final class MIDIManager {
             append(description)
             guard message.count == 3 else { continue }
             let opcode = message[0] & 0xF0
-            // Control Change on the tuning encoder → relative steps.
+            if opcode == 0xB0 {
+                lastControlChange = ControlChange(channel: (message[0] & 0x0F) + 1, number: message[1])
+            }
+            // Control Change on the tuning encoder -> relative steps.
             if opcode == 0xB0, message[1] == tuningCC {
                 // CTR2 relative encoder: value is a signed velocity offset from 64
-                // (65 = +1 slow, 74 = +10 fast, 63 = −1, 54 = −10). value > 64 = up.
+                // (65 = +1 slow, 74 = +10 fast, 63 = -1, 54 = -10). value > 64 = up.
                 let delta = max(-32, min(32, Int(message[2]) - 64))
                 if delta != 0 { onTuneStep?(delta) }
             }
