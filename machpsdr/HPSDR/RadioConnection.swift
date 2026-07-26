@@ -18,6 +18,12 @@ nonisolated struct StreamUpdate: Sendable {
     var sequenceGaps: Int
     /// RMS magnitude of the RX0 I/Q over the interval, in [0, 1].
     var signalRMS: Float
+    /// EP4 wideband (raw ADC bandscope) datagrams per second; 0 unless the
+    /// wideband probe is enabled AND the firmware actually emits the stream.
+    var widebandPacketsPerSecond: Int = 0
+    /// PureSignal calcc state (WDSP's calibration state machine, info[15]);
+    /// -1 when PureSignal is not armed.
+    var psState: Int32 = -1
 }
 
 /// Thread-safe holder for the mutable radio settings shared between the actor
@@ -84,8 +90,9 @@ actor RadioConnection {
     private let dspCommands = DSPCommandQueue()
 
     /// Maximum number of receive slices the app supports. The radio streams fewer:
-    /// the ANAN-10E gateware supports up to 4 DDCs and the Protocol-1 receiver-count
-    /// field maxes at 8, so the on-air count is clamped in `setActiveSliceCount`.
+    /// the original ANAN-10E's EP3C25 gateware supports only 2 DDCs (the HL2 does 4;
+    /// the Protocol-1 receiver-count field maxes at 8), so the on-air count is
+    /// clamped in `setActiveSliceCount`.
     static let maxSlices = 10
 
     // Experiments from the add-slice investigation, OFF until verified live — with
@@ -119,6 +126,10 @@ actor RadioConnection {
     /// Output device UID for received audio (nil = system default).
     private var audioOutputUID: String?
     private var currentMode: RadioMode = .usb
+    /// Which slice's frequency/mode the transmitter follows. Kept in sync with the
+    /// UI's focused slice: whichever receiver you're looking at is what keying PTT
+    /// transmits on.
+    private var transmitSliceIndex: Int = 0
 
     // Transmit path: WDSP TXA turns mic/tone into TX I/Q that the send loop packs
     // into EP2 frames (with MOX + drive) while `transmit.transmitting` is true.
@@ -208,7 +219,7 @@ actor RadioConnection {
         var drainTimeout = timeval(tv_sec: 0, tv_usec: 50_000)
         setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &drainTimeout, socklen_t(MemoryLayout<timeval>.size))
         let stopPacket = HPSDRProtocol1.stopCommand()
-        let startPacket = HPSDRProtocol1.startCommand(iq: true)
+        let startPacket = HPSDRProtocol1.startCommand(iq: true, wideband: settings.wideband)
         var drain = [UInt8](repeating: 0, count: 2048)
         func sendStop() { _ = stopPacket.withUnsafeBytes { send(socketFD, $0.baseAddress, $0.count, 0) } }
         func sendStart() { _ = startPacket.withUnsafeBytes { send(socketFD, $0.baseAddress, $0.count, 0) } }
@@ -297,8 +308,10 @@ actor RadioConnection {
         // cushion instead of racing the first WDSP blocks.
         let mix = SliceAudioMixer(deviceUID: audioOutputUID)
         for i in 0..<activeSliceCount {
-            engines[i].ring.reset(primingSilence: Self.audioPrimeSamples)
-            mix.setSlice(i, ring: engines[i].ring, pan: engines[i].pan, enabled: true)
+            // Binaural rings run at 2× the sample flow, so double the cushion.
+            engines[i].ring.reset(primingSilence: Self.audioPrimeSamples * (engines[i].binaural ? 2 : 1))
+            mix.setSlice(i, ring: engines[i].ring, pan: engines[i].pan,
+                         stereo: engines[i].binaural, enabled: true)
         }
         do {
             try mix.start()
@@ -381,17 +394,42 @@ actor RadioConnection {
         dsp(key: key.map { "\($0).\(index)" }) { op(engines[index].wdsp) }
     }
 
-    /// Sets a slice's demodulation mode. Slice 0 also sets the matching transmit mode.
+    /// Sets a slice's demodulation mode. The transmit-slice also sets the matching
+    /// transmit mode.
     func setMode(_ mode: RadioMode, slice: Int = 0) {
         guard engines.indices.contains(slice) else { return }
-        if slice == 0 { currentMode = mode }
+        if slice == transmitSliceIndex { currentMode = mode }
         let engines = self.engines
         let tx = wdspTx
+        let transmitSlice = transmitSliceIndex
         dsp {
-            if slice == 0 { tx.setMode(mode) }
+            if slice == transmitSlice { tx.setMode(mode) }
             engines[slice].wdsp.setMode(mode)
             engines[slice].ring.reset(primingSilence: RadioConnection.audioPrimeSamples)
         }
+    }
+
+    /// Sets the transmit NCO frequency (Hz). The session computes this from the
+    /// operating VFO plus split (VFO B) and XIT offsets. Applied on the next
+    /// outgoing EP2 frame; also feeds the HL2 IO-board amp band-follow.
+    func setTransmitFrequency(_ hz: UInt32) {
+        var s = settingsBox.current
+        s.transmitFrequency = hz
+        settingsBox.current = s
+    }
+
+    /// Switches which slice the transmitter follows, re-pointing the TX frequency
+    /// and mode at that slice's current values. Called whenever the UI's focused
+    /// slice changes, so PTT always transmits on the slice you're looking at.
+    func setTransmitSlice(_ index: Int, frequency: UInt32, mode: RadioMode) {
+        guard engines.indices.contains(index) else { return }
+        transmitSliceIndex = index
+        currentMode = mode
+        var s = settingsBox.current
+        s.transmitFrequency = frequency
+        settingsBox.current = s
+        let tx = wdspTx
+        dsp { tx.setMode(mode) }
     }
 
     /// Keys/unkeys the transmitter. On key-down this starts mic capture and feeds it
@@ -538,7 +576,8 @@ actor RadioConnection {
         mixer?.stop()
         let mix = SliceAudioMixer(deviceUID: uid)
         for i in 0..<activeSliceCount {
-            mix.setSlice(i, ring: engines[i].ring, pan: engines[i].pan, enabled: true)
+            mix.setSlice(i, ring: engines[i].ring, pan: engines[i].pan,
+                         stereo: engines[i].binaural, enabled: true)
         }
         do {
             try mix.start()
@@ -580,6 +619,8 @@ actor RadioConnection {
     func setSpectralNRGainMethod(_ method: Int, slice: Int = 0) { runOnSlice(slice) { $0.setSpectralNRGainMethod(method) } }
     func setSpectralNRNPEMethod(_ method: Int, slice: Int = 0) { runOnSlice(slice) { $0.setSpectralNRNPEMethod(method) } }
     func setSpectralNRArtifactReduction(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setSpectralNRArtifactReduction(on) } }
+    func setSpectralNRPost(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setSpectralNRPost(on) } }
+    func setSpectralNRPostFactor(_ factor: Double, slice: Int = 0) { runOnSlice(slice, key: "nr2PostFactor") { $0.setSpectralNRPostFactor(factor) } }
     func setANR(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setANR(on) } }
     func setANRStrength(_ taps: Int, slice: Int = 0) { runOnSlice(slice, key: "anrTaps") { $0.setANRStrength(taps) } }
     func setNR3(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setNR3(on) } }
@@ -608,12 +649,31 @@ actor RadioConnection {
     func setAPF(_ on: Bool, slice: Int = 0) { runOnSlice(slice) { $0.setAPF(on) } }
     func setAPFBandwidth(_ bw: Double, slice: Int = 0) { runOnSlice(slice, key: "apfBW") { $0.setAPFBandwidth(bw) } }
 
+    /// Binaural rendering for a slice: flips the WDSP patchpanel, the ring format
+    /// (interleaved stereo), and the mixer's reader in ONE DSP command so the
+    /// producer and consumer formats can't disagree mid-stream.
+    func setBinaural(_ on: Bool, slice: Int = 0) {
+        guard engines.indices.contains(slice) else { return }
+        engines[slice].binaural = on   // for mixer re-registration on device change
+        let engines = self.engines
+        let mixer = self.mixer
+        dsp {
+            engines[slice].wdsp.setBinaural(on)
+            engines[slice].ring.reset(primingSilence: RadioConnection.audioPrimeSamples * (on ? 2 : 1))
+            mixer?.setSliceStereo(slice, on)
+        }
+    }
+
+    /// AM/SAM sideband selection (0 both, 1 LSB, 2 USB), per slice.
+    func setAMSideband(_ mode: Int, slice: Int = 0) { runOnSlice(slice) { $0.setAMSideband(mode) } }
+
     /// Tunes receiver `index` to `hz`. Applied on the next outgoing EP2 frame.
+    /// Does NOT move the TX frequency: the session owns that via
+    /// `setTransmitFrequency`, because split/XIT can steer TX away from RX.
     func setFrequency(_ hz: UInt32, receiver index: Int = 0) {
         var s = settingsBox.current
         while s.receiverFrequencies.count <= index { s.receiverFrequencies.append(hz) }
         s.receiverFrequencies[index] = hz
-        if index == 0 { s.transmitFrequency = hz }
         settingsBox.current = s
         // The audio ring is deliberately NOT reset here: it holds ≤0.5 s, so a retune
         // just plays a brief tail of the old frequency and flows into the new one —
@@ -696,6 +756,83 @@ actor RadioConnection {
         }
     }
 
+    // MARK: - PureSignal
+
+    /// The receiver slots the gateware dedicates to PureSignal feedback (piHPSDR's
+    /// mapping): ANAN-10E/100B-class Hermes uses RX1 (RF sampler) + RX2 (TX DAC);
+    /// the Hermes Lite 2 uses RX3 + RX4.
+    private var psFeedbackSlots: (rx: Int, tx: Int) {
+        radio.board == .hermesLite ? (2, 3) : (0, 1)
+    }
+
+    /// Receivers the stream must carry for PS feedback to arrive.
+    nonisolated var pureSignalRequiredReceivers: Int {
+        radio.board == .hermesLite ? 4 : 2
+    }
+
+    /// Arms/disarms PureSignal. The caller (session) enforces the preconditions:
+    /// 192 kHz sample rate and enough active receivers to carry the feedback slots.
+    /// Arming retunes the feedback NCOs to the TX frequency during MOX and routes
+    /// their samples into WDSP's calcc; the iqc correction engages after a cal.
+    func setPureSignal(_ on: Bool) {
+        let slots = psFeedbackSlots
+        var s = settingsBox.current
+        s.puresignal = on
+        s.psRxFeedback = slots.rx
+        s.psTxFeedback = slots.tx
+        settingsBox.current = s
+        transmit.puresignal = (on, slots.rx, slots.tx)
+        let tx = wdspTx
+        let rate = s.sampleRate.hertz
+        dsp {
+            if on {
+                tx.setPureSignalFeedbackRate(rate)
+                // Arm collection with no automatic cal: the Single Cal button
+                // triggers mancal (the 10E's continuous-cal picket-fence workaround).
+                tx.pureSignalControl(reset: false, mancal: false, automode: false, turnon: false)
+            } else {
+                tx.pureSignalControl(reset: true, mancal: false, automode: false, turnon: false)
+                tx.setPureSignalMox(false)
+            }
+        }
+    }
+
+    /// Runs one full calibration on the next keyed feedback (WDSP mancal). The
+    /// correction is applied and held when the calibration completes.
+    func pureSignalSingleCal() {
+        let tx = wdspTx
+        dsp { tx.pureSignalControl(reset: false, mancal: true, automode: false, turnon: false) }
+    }
+
+    /// Enables/disables the EP4 wideband (raw ADC bandscope) stream. The enable
+    /// bit rides in the Metis START command, so a live stream is rebuilt (STOP →
+    /// fresh socket → primed START) the same way a slice-count change is.
+    func setWideband(_ on: Bool) {
+        var s = settingsBox.current
+        guard s.wideband != on else { return }
+        s.wideband = on
+        settingsBox.current = s
+        guard running.get() else { return }
+        let ip = radio.ipAddress
+        let socket = socketBox
+        let box = settingsBox
+        dsp {
+            let old = socket.current
+            if old >= 0 {
+                let stop = HPSDRProtocol1.stopCommand()
+                _ = stop.withUnsafeBytes { send(old, $0.baseAddress, $0.count, 0) }
+                close(old)
+            }
+            if let stream = RadioConnection.openStreamSocket(ip: ip, settings: box.current) {
+                socket.swap(fd: stream.fd, nextSeq: stream.nextSeq)
+                NSLog("DSP: rebuilt socket (wideband \(on ? "ON" : "off"))")
+            } else {
+                socket.current = -1
+                NSLog("DSP: socket rebuild FAILED (wideband toggle)")
+            }
+        }
+    }
+
     /// Changes the sample rate. Applied on the next outgoing EP2 frame.
     func setSampleRate(_ rate: HPSDRProtocol1.SampleRate) {
         var s = settingsBox.current
@@ -748,6 +885,7 @@ actor RadioConnection {
         var intervalStart = Date()
         var packetsInInterval = 0
         var gapsInInterval = 0
+        var widebandInInterval = 0
         var rmsAccum: Double = 0
         var sampleCount = 0
         var lastStatus = RadioStreamStatus()
@@ -773,6 +911,8 @@ actor RadioConnection {
         var ep2Frame = [UInt8](repeating: 0, count: HPSDRProtocol1.frameSize)
         var frameIQ = [Float](repeating: 0, count: 252)
         var lastFD: Int32 = -2
+        var lastTransmitting = false
+        var psState: Int32 = -1
         var nextEP2SendNs = DispatchTime.now().uptimeNanoseconds
         var ep2SentInInterval = 0
         var dbgEP2Sent = 0
@@ -820,10 +960,26 @@ actor RadioConnection {
             let settingsSnapshot = settings.current
             let transmitting = transmit.transmitting
             let tuning = transmit.tune
+            let puresignal = transmit.puresignal
+
+            // PureSignal: calcc must see every key-down/key-up edge (it gates its
+            // delay lines and calibration state machine on MOX).
+            if transmitting != lastTransmitting {
+                lastTransmitting = transmitting
+                if puresignal.on { wdspTx.setPureSignalMox(transmitting) }
+            }
 
             // Receive one EP6 datagram (blocks up to the socket timeout).
             let received = buffer.withUnsafeMutableBytes { recv(fd, $0.baseAddress, $0.count, 0) }
             if received > 522 { dbgReceived = Int(received) }
+            // EP4 wideband probe: count raw-ADC bandscope datagrams (the assembler
+            // ignores non-EP6 endpoints, so this is the only accounting they get).
+            if received > 8,
+               buffer[0] == HPSDRProtocol1.metisMagic0,
+               buffer[1] == HPSDRProtocol1.metisMagic1,
+               buffer[3] == HPSDRProtocol1.endpointWideband {
+                widebandInInterval += 1
+            }
             let tProc0 = DispatchTime.now().uptimeNanoseconds
             if received > 0,
                let result = assembler.feed(buffer, length: Int(received),
@@ -838,6 +994,14 @@ actor RadioConnection {
                 // Empty samples = no USB frame completed this datagram (assembler is
                 // mid-frame or hunting for sync); status would be default-empty then.
                 if !result.samples.isEmpty { lastStatus = result.status }
+                // While transmitting with PureSignal armed, the duplex stream's
+                // feedback receivers carry the RF sampler + TX DAC loopback —
+                // route them into calcc instead of the audio DSP.
+                if transmitting, puresignal.on,
+                   result.receivers.count > max(puresignal.rxIndex, puresignal.txIndex) {
+                    wdspTx.addPureSignalFeedback(tx: result.receivers[puresignal.txIndex],
+                                                 rx: result.receivers[puresignal.rxIndex])
+                }
                 // While transmitting, skip the receive DSP so the send loop keeps full rate.
                 if !transmitting {
                     let span = settingsSnapshot.sampleRate.hertz
@@ -979,10 +1143,14 @@ actor RadioConnection {
             if elapsed >= 0.1 {
                 let rms = sampleCount > 0 ? Float((rmsAccum / Double(sampleCount)).squareRoot()) : 0
                 let pps = Int(Double(packetsInInterval) / elapsed)
+                // PureSignal cal-state readback, on this (the DSP) thread.
+                psState = puresignal.on ? wdspTx.pureSignalInfo()[15] : -1
                 updates?.yield(StreamUpdate(status: lastStatus,
                                             packetsPerSecond: pps,
                                             sequenceGaps: gapsInInterval,
-                                            signalRMS: rms))
+                                            signalRMS: rms,
+                                            widebandPacketsPerSecond: Int(Double(widebandInInterval) / elapsed),
+                                            psState: psState))
                 dbgFlushCount += 1
                 dbgGaps += gapsInInterval
                 dbgEP2Sent += ep2SentInInterval
@@ -1026,6 +1194,7 @@ actor RadioConnection {
                 intervalStart = Date()
                 packetsInInterval = 0
                 gapsInInterval = 0
+                widebandInInterval = 0
                 rmsAccum = 0
                 sampleCount = 0
             }
@@ -1098,6 +1267,8 @@ private nonisolated final class SliceEngine: @unchecked Sendable {
     let spectrum: SpectrumBuffer
     /// Stereo pan for the mixer: −1 = hard left, 0 = center, +1 = hard right.
     var pan: Float = 0
+    /// True when the slice renders binaural (ring carries interleaved stereo).
+    var binaural = false
 
     init(index: Int, spectrum: SpectrumBuffer) {
         self.spectrum = spectrum
@@ -1115,6 +1286,9 @@ private nonisolated final class TransmitBox: @unchecked Sendable {
     private var _tune = false
     private var _digital = false
     private var _drive: UInt8 = 0
+    private var _puresignal = false
+    private var _psRxIndex = 0
+    private var _psTxIndex = 1
     var transmitting: Bool {
         get { os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }; return _transmitting }
         set { os_unfair_lock_lock(&lock); _transmitting = newValue; os_unfair_lock_unlock(&lock) }
@@ -1131,6 +1305,20 @@ private nonisolated final class TransmitBox: @unchecked Sendable {
     var drive: UInt8 {
         get { os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }; return _drive }
         set { os_unfair_lock_lock(&lock); _drive = newValue; os_unfair_lock_unlock(&lock) }
+    }
+    /// PureSignal armed + the receiver slots carrying the feedback streams.
+    var puresignal: (on: Bool, rxIndex: Int, txIndex: Int) {
+        get {
+            os_unfair_lock_lock(&lock); defer { os_unfair_lock_unlock(&lock) }
+            return (_puresignal, _psRxIndex, _psTxIndex)
+        }
+        set {
+            os_unfair_lock_lock(&lock)
+            _puresignal = newValue.on
+            _psRxIndex = newValue.rxIndex
+            _psTxIndex = newValue.txIndex
+            os_unfair_lock_unlock(&lock)
+        }
     }
 }
 

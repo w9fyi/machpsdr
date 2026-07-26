@@ -23,15 +23,26 @@ final class RadioSession {
     private(set) var state: State = .disconnected
     private(set) var lastUpdate: StreamUpdate?
     var frequencyHz: UInt32 = 7_100_000
+    // Split / VFO B: when split is on, the transmitter keys on VFO B while the
+    // focused slice keeps receiving on its own frequency. RIT shifts Slice A's
+    // receive NCO only; XIT shifts the transmit NCO only.
+    var vfoBHz: UInt32 = 7_100_000
+    var splitOn = false
+    var ritOn = false
+    var ritHz = 0
+    var xitOn = false
+    var xitHz = 0
     var sampleRate: HPSDRProtocol1.SampleRate = .rate48k
     var mode: RadioMode = .usb
     var volume: Float = 0.5
     var muted = false
     // Noise reduction (RXA DSP)
     var spectralNR = false              // EMNR spectral subtraction
-    var spectralNRGainMethod = 2        // 0 linear, 1 log, 2 gamma
-    var spectralNRNPEMethod = 0         // 0 OSMS, 1 MMSE
+    var spectralNRGainMethod = 2        // 0 linear, 1 log, 2 gamma, 3 trained
+    var spectralNRNPEMethod = 0         // 0 OSMS, 1 MMSE, 2 NSTAT
     var spectralNRArtifact = true       // EMNR artifact (musical-noise) reduction
+    var spectralNRPost = false          // EMNR psychoacoustic post-processing
+    var spectralNRPostFactor = 0.15     // post-processing strength (WDSP default)
     var lmsNR = false                   // ANR (LMS)
     var lmsNRStrength = 64              // ANR LMS filter taps (strength)
     var nr3 = false                     // NR3: RNNoise neural denoiser
@@ -48,6 +59,8 @@ final class RadioSession {
     var snb = false                     // SNB spectral noise blanker
     var apf = false                     // APF CW audio peaking filter
     var apfBandwidth = 100.0            // APF peak bandwidth, Hz
+    var binaural = false                // binaural (stereo) rendering, Slice A
+    var amSideband = 0                  // AM/SAM sideband: 0 both, 1 LSB, 2 USB
     // MNF manual notches (persisted). `manualNotchOn` is the master enable.
     var manualNotchOn = false
     var manualNotches: [ManualNotch] = []
@@ -106,6 +119,20 @@ final class RadioSession {
     var activeSliceCount: Int { extraSlices.count + 1 }
     /// Indices (0…activeSliceCount-1) for iterating panadapters.
     var sliceIndices: Range<Int> { 0..<activeSliceCount }
+    /// Slice currently controlled by the main tuning rows and slice shortcuts.
+    var focusedSliceIndex = 0
+
+    static func sliceName(for index: Int) -> String {
+        let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        if letters.indices.contains(index) { return "Slice \(letters[index])" }
+        return "Slice \(index + 1)"
+    }
+
+    static func sliceShortLabel(for index: Int) -> String {
+        let letters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        if letters.indices.contains(index) { return String(letters[index]) }
+        return "\(index + 1)"
+    }
 
     // CAT server (Kenwood TS-2000 emulation over TCP for WSJT-X/fldigi/loggers).
     // Enabled state and port are persisted.
@@ -115,13 +142,32 @@ final class RadioSession {
 
     let midi = MIDIManager()
     let bandData = BandDataStore()
+    let bandSettings = BandSettingsStore()
     private var currentBandOC: UInt8 = 0
     private var lastBandID: String?
+    private var settingsBandID: String?
 
     init() {
         let defaults = UserDefaults.standard
         selectedMicUID = defaults.string(forKey: "selectedMicUID")
         selectedOutputUID = defaults.string(forKey: "selectedOutputUID")
+        if defaults.object(forKey: "frequencyHz") != nil {
+            frequencyHz = UInt32(clamping: defaults.integer(forKey: "frequencyHz"))
+        }
+        vfoBHz = defaults.object(forKey: "vfoBHz") != nil
+            ? UInt32(clamping: defaults.integer(forKey: "vfoBHz")) : frequencyHz
+        if let rawMode = defaults.string(forKey: "mode"), let savedMode = RadioMode(rawValue: rawMode) {
+            mode = savedMode
+            filterWidth = savedMode.defaultWidth
+            filterLow = savedMode.defaultLow
+            filterHigh = savedMode.defaultHigh
+        }
+        if defaults.object(forKey: "midiTuningEnabled") != nil {
+            midiTuningEnabled = defaults.bool(forKey: "midiTuningEnabled")
+        }
+        if defaults.object(forKey: "midiTuningStepHz") != nil {
+            midiTuningStepHz = defaults.integer(forKey: "midiTuningStepHz")
+        }
         // Restore transmit settings across app launches. Guard on object(forKey:)
         // so an absent key keeps the safe default rather than reading back 0.
         if defaults.object(forKey: "driveLevel") != nil {
@@ -144,6 +190,10 @@ final class RadioSession {
         if defaults.object(forKey: "frequencyPPM") != nil {
             frequencyPPM = max(-100, min(100, defaults.double(forKey: "frequencyPPM")))
         }
+        binaural = defaults.bool(forKey: "binaural")
+        if defaults.object(forKey: "amSideband") != nil {
+            amSideband = max(0, min(2, defaults.integer(forKey: "amSideband")))
+        }
         if let data = defaults.data(forKey: "manualNotches"),
            let saved = try? JSONDecoder().decode([ManualNotch].self, from: data) {
             manualNotches = saved
@@ -152,6 +202,18 @@ final class RadioSession {
         catEnabled = defaults.bool(forKey: "catEnabled")
         if defaults.object(forKey: "catPort") != nil {
             catPort = defaults.integer(forKey: "catPort")
+        }
+        // Per-band memory: recall the stored settings for the restored frequency's
+        // band (also restores AGC across launches, which has no global key).
+        if let band = Band.band(for: frequencyHz) {
+            settingsBandID = band.id
+            if let saved = bandSettings.settings(for: band.id) {
+                agcMode = saved.agcMode
+                agcThreshold = saved.agcThreshold
+                micGain = saved.micGain
+                driveLevel = saved.driveLevel
+                txProcessing = saved.txProcessing
+            }
         }
         midi.onTuneStep = { [weak self] steps in
             guard let self, self.midiTuningEnabled else { return }
@@ -181,11 +243,21 @@ final class RadioSession {
         if catEnabled { catServer.start(port: UInt16(clamping: clamped), radio: self) }
     }
 
-    /// Adjusts the receiver frequency by `steps` tuning detents.
+    /// Adjusts the focused receiver frequency by `steps` tuning detents.
     func tuneBy(steps: Int) {
         let delta = steps * midiTuningStepHz
-        let newFrequency = max(0, Int(frequencyHz) + delta)
-        setFrequency(UInt32(newFrequency))
+        let newFrequency = max(0, Int(frequency(forSlice: focusedSliceIndex)) + delta)
+        setFrequency(UInt32(newFrequency), forSlice: focusedSliceIndex)
+    }
+
+    func setMIDITuningEnabled(_ enabled: Bool) {
+        midiTuningEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "midiTuningEnabled")
+    }
+
+    func setMIDITuningStepHz(_ stepHz: Int) {
+        midiTuningStepHz = stepHz
+        UserDefaults.standard.set(stepHz, forKey: "midiTuningStepHz")
     }
 
     private var connection: RadioConnection?
@@ -206,8 +278,8 @@ final class RadioSession {
         var settings = RadioSettings()
         settings.sampleRate = sampleRate
         settings.receiverCount = activeSliceCount
-        settings.receiverFrequencies = [frequencyHz] + extraSlices.map { $0.frequencyHz }
-        settings.transmitFrequency = frequencyHz
+        settings.receiverFrequencies = [effectiveRX0Hz] + extraSlices.map { $0.frequencyHz }
+        settings.transmitFrequency = effectiveTransmitHz
         settings.rxLNAGain = rxLNAGain
         settings.frequencyCalibrationPPM = frequencyPPM
         let conn = RadioConnection(radio: radio, settings: settings)
@@ -244,15 +316,90 @@ final class RadioSession {
         lastUpdate = nil
         isTransmitting = false
         isTuning = false
+        puresignal = false      // armed per connection; never carries over
+        psStatusMessage = ""
+        widebandProbe = false
         state = .disconnected
         Task { await conn?.stop() }
     }
 
     func setFrequency(_ hz: UInt32) {
         frequencyHz = hz
-        let conn = connection
-        Task { await conn?.setFrequency(hz) }
+        UserDefaults.standard.set(Int(hz), forKey: "frequencyHz")
+        pushRX0()
+        if focusedSliceIndex == 0 { pushTransmitFrequency() }
         updateBandData(for: hz)
+        updateBandSettings(for: hz)
+    }
+
+    // MARK: - Split / VFO B / RIT / XIT
+
+    /// Slice A's receive NCO: the displayed frequency plus the RIT offset.
+    private var effectiveRX0Hz: UInt32 {
+        UInt32(clamping: Int(frequencyHz) + (ritOn ? ritHz : 0))
+    }
+
+    /// The transmit NCO: VFO B when split, else the focused slice's frequency —
+    /// plus the XIT offset. RIT never moves the transmitter.
+    var effectiveTransmitHz: UInt32 {
+        let base = splitOn ? Int(vfoBHz) : Int(frequency(forSlice: focusedSliceIndex))
+        return UInt32(clamping: base + (xitOn ? xitHz : 0))
+    }
+
+    private func pushRX0() {
+        let conn = connection
+        let hz = effectiveRX0Hz
+        Task { await conn?.setFrequency(hz) }
+    }
+
+    private func pushTransmitFrequency() {
+        let conn = connection
+        let hz = effectiveTransmitHz
+        Task { await conn?.setTransmitFrequency(hz) }
+    }
+
+    func setVFOB(_ hz: UInt32) {
+        vfoBHz = hz
+        UserDefaults.standard.set(Int(hz), forKey: "vfoBHz")
+        if splitOn { pushTransmitFrequency() }
+    }
+
+    func setSplit(_ on: Bool) {
+        splitOn = on
+        pushTransmitFrequency()
+    }
+
+    /// A→B: copies the focused slice's frequency into VFO B.
+    func copyAToB() {
+        setVFOB(frequency(forSlice: focusedSliceIndex))
+    }
+
+    /// A⇄B: swaps VFO A (Slice A) and VFO B.
+    func swapAB() {
+        let a = frequencyHz
+        let b = vfoBHz
+        setFrequency(b)
+        setVFOB(a)
+    }
+
+    func setRIT(_ on: Bool) {
+        ritOn = on
+        pushRX0()
+    }
+
+    func setRITOffset(_ hz: Int) {
+        ritHz = max(-9999, min(9999, hz))
+        if ritOn { pushRX0() }
+    }
+
+    func setXIT(_ on: Bool) {
+        xitOn = on
+        pushTransmitFrequency()
+    }
+
+    func setXITOffset(_ hz: Int) {
+        xitHz = max(-9999, min(9999, hz))
+        if xitOn { pushTransmitFrequency() }
     }
 
     /// Auto-updates amp band data when the frequency crosses into a different band.
@@ -265,15 +412,123 @@ final class RadioSession {
         setOpenCollector(currentBandOC)
     }
 
+    /// Recalls the stored per-band settings when the frequency crosses into a
+    /// different band. Settings write through to the store as they change, so
+    /// leaving a band needs no explicit snapshot.
+    private func updateBandSettings(for hz: UInt32) {
+        guard let band = Band.band(for: hz), band.id != settingsBandID else { return }
+        settingsBandID = band.id
+        guard let saved = bandSettings.settings(for: band.id) else {
+            // First visit to this band: seed it with the current settings.
+            bandSettings.save(currentBandSettings, for: band.id)
+            return
+        }
+        setAGCMode(saved.agcMode)
+        setAGCThreshold(saved.agcThreshold)
+        setMicGain(saved.micGain)
+        setDrive(saved.driveLevel)
+        setTXProcessing(saved.txProcessing)
+    }
+
+    private var currentBandSettings: BandSettings {
+        BandSettings(agcMode: agcMode, agcThreshold: agcThreshold, micGain: micGain,
+                     driveLevel: driveLevel, txProcessing: txProcessing)
+    }
+
+    /// Write-through: persists the current settings under the current band.
+    private func saveBandSettings() {
+        guard let bandID = Band.band(for: frequencyHz)?.id else { return }
+        bandSettings.save(currentBandSettings, for: bandID)
+    }
+
+    // MARK: - PureSignal (adaptive predistortion)
+
+    /// Armed per session (never persisted — it retunes receivers during TX).
+    private(set) var puresignal = false
+    private(set) var psStatusMessage = ""
+
+    /// Receivers the stream must carry for the PS feedback slots: the 10E's
+    /// gateware puts the RF sampler on RX1 and the TX DAC on RX2 (so 2 slices);
+    /// the HL2 uses RX3/RX4 (so 4).
+    var psRequiredSlices: Int { isHermesLite ? 4 : 2 }
+
+    func setPureSignal(_ on: Bool) {
+        if on {
+            guard isConnected else {
+                psStatusMessage = "Connect to a radio first."
+                return
+            }
+            guard sampleRate == .rate192k else {
+                psStatusMessage = "PureSignal needs the 192 kHz sample rate (classic Protocol 1 requirement)."
+                return
+            }
+            guard activeSliceCount >= psRequiredSlices else {
+                psStatusMessage = isHermesLite
+                    ? "PureSignal on the HL2 needs 4 active slices (RX3/RX4 carry the feedback)."
+                    : "PureSignal needs 2 active slices — the second receiver carries the TX DAC feedback."
+                return
+            }
+        }
+        puresignal = on
+        psStatusMessage = on
+            ? "Armed. Key the transmitter with voice or two-tone, then press Single Cal."
+            : ""
+        let conn = connection
+        Task { await conn?.setPureSignal(on) }
+    }
+
+    /// One full calibration on the next keyed feedback (WDSP mancal) — the 10E
+    /// workaround for the continuous-cal picket-fence artifact. The correction is
+    /// applied and held when the calibration completes (state reaches STAYON).
+    func pureSignalSingleCal() {
+        guard puresignal else { return }
+        psStatusMessage = "Calibrating — keep transmitting until the state reads STAYON…"
+        let conn = connection
+        Task { await conn?.pureSignalSingleCal() }
+    }
+
+    /// Human-readable name for calcc's calibration state (StreamUpdate.psState).
+    static func psStateName(_ state: Int32) -> String {
+        switch state {
+        case -1: return "off"
+        case 0: return "RESET"
+        case 1: return "WAIT (key TX)"
+        case 2: return "MOX DELAY"
+        case 3: return "SETUP"
+        case 4: return "COLLECT"
+        case 5: return "MOX CHECK"
+        case 6: return "CALC"
+        case 7: return "DELAY"
+        case 8: return "STAYON (correcting)"
+        case 9: return "TURNON"
+        default: return "state \(state)"
+        }
+    }
+
+    /// EP4 wideband probe: asks the radio for the raw-ADC bandscope stream so the
+    /// Live Stream section can show whether this firmware emits it. Experimental —
+    /// not persisted and not re-applied on reconnect.
+    var widebandProbe = false
+    func setWidebandProbe(_ on: Bool) {
+        widebandProbe = on
+        let conn = connection
+        Task { await conn?.setWideband(on) }
+    }
+
     func setSampleRate(_ rate: HPSDRProtocol1.SampleRate) {
         sampleRate = rate
         UserDefaults.standard.set(Int(rate.rawValue), forKey: "sampleRate")
+        if puresignal && rate != .rate192k {
+            setPureSignal(false)
+            psStatusMessage = "PureSignal disarmed: it needs the 192 kHz sample rate."
+        }
         let conn = connection
         Task { await conn?.setSampleRate(rate) }
     }
 
     func setMode(_ newMode: RadioMode) {
         mode = newMode
+        UserDefaults.standard.set(newMode.rawValue, forKey: "mode")
         // Mirror WDSP's per-mode filter defaults so the sliders stay in sync.
         filterWidth = newMode.defaultWidth
         filterLow = newMode.defaultLow
@@ -343,6 +598,18 @@ final class RadioSession {
         spectralNRArtifact = on
         let conn = connection
         Task { await conn?.setSpectralNRArtifactReduction(on) }
+    }
+
+    func setSpectralNRPost(_ on: Bool) {
+        spectralNRPost = on
+        let conn = connection
+        Task { await conn?.setSpectralNRPost(on) }
+    }
+
+    func setSpectralNRPostFactor(_ factor: Double) {
+        spectralNRPostFactor = factor
+        let conn = connection
+        Task { await conn?.setSpectralNRPostFactor(factor) }
     }
 
     func setLMSNR(_ on: Bool) {
@@ -429,6 +696,23 @@ final class RadioSession {
         Task { await conn?.setAPFBandwidth(bw) }
     }
 
+    /// Binaural (stereo) rendering of Slice A: WDSP feeds the demodulator's
+    /// quadrature pair to left/right — spatializes the passband by ear.
+    func setBinaural(_ on: Bool) {
+        binaural = on
+        UserDefaults.standard.set(on, forKey: "binaural")
+        let conn = connection
+        Task { await conn?.setBinaural(on) }
+    }
+
+    /// AM/SAM sideband selection: 0 = both (DSB), 1 = LSB only, 2 = USB only.
+    func setAMSideband(_ mode: Int) {
+        amSideband = mode
+        UserDefaults.standard.set(mode, forKey: "amSideband")
+        let conn = connection
+        Task { await conn?.setAMSideband(mode) }
+    }
+
     // MARK: - Manual notch filters (MNF)
 
     /// Maps the notch list to Sendable tuples and pushes it to the connection.
@@ -513,12 +797,14 @@ final class RadioSession {
 
     func setAGCMode(_ mode: Int) {
         agcMode = mode
+        saveBandSettings()
         let conn = connection
         Task { await conn?.setAGCMode(mode) }
     }
 
     func setAGCThreshold(_ db: Double) {
         agcThreshold = db
+        saveBandSettings()
         let conn = connection
         Task { await conn?.setAGCTop(db) }
     }
@@ -792,6 +1078,7 @@ final class RadioSession {
     func setDrive(_ percent: Double) {
         driveLevel = percent
         UserDefaults.standard.set(percent, forKey: "driveLevel")
+        saveBandSettings()
         let conn = connection
         let level = driveByte
         Task { await conn?.setDrive(level) }
@@ -800,6 +1087,7 @@ final class RadioSession {
     func setMicGain(_ gain: Double) {
         micGain = gain
         UserDefaults.standard.set(gain, forKey: "micGain")
+        saveBandSettings()
         let conn = connection
         Task { await conn?.setMicGain(gain) }
     }
@@ -826,6 +1114,7 @@ final class RadioSession {
     func setTXProcessing(_ profile: TXProcessing) {
         txProcessing = profile
         UserDefaults.standard.set(profile.rawValue, forKey: "txProcessing")
+        saveBandSettings()
         let conn = connection
         let on = profile.compressorOn
         let gain = profile.compressorGain
@@ -899,6 +1188,7 @@ final class RadioSession {
         let index = activeSliceCount
         let info = SliceInfo(id: index, frequencyHz: frequencyHz, mode: mode, volume: 0.5, pan: 0)
         extraSlices.append(info)
+        focusedSliceIndex = index
         let conn = connection
         let n = activeSliceCount
         Task {
@@ -908,15 +1198,22 @@ final class RadioSession {
             await conn?.setVolume(info.volume, slice: index)
             await conn?.setPan(info.pan, slice: index)
         }
+        followTransmitToFocusedSlice()
     }
 
     /// Removes the highest-numbered receive slice.
     func removeSlice() {
         guard !extraSlices.isEmpty else { return }
         extraSlices.removeLast()
+        if puresignal && activeSliceCount < psRequiredSlices {
+            setPureSignal(false)
+            psStatusMessage = "PureSignal disarmed: the feedback receiver's slice was removed."
+        }
+        focusedSliceIndex = min(focusedSliceIndex, activeSliceCount - 1)
         let conn = connection
         let n = activeSliceCount
         Task { await conn?.setActiveSliceCount(n) }
+        followTransmitToFocusedSlice()
     }
 
     func setSliceFrequency(_ index: Int, _ hz: UInt32) {
@@ -924,6 +1221,7 @@ final class RadioSession {
         extraSlices[k].frequencyHz = hz
         let conn = connection
         Task { await conn?.setFrequency(hz, receiver: index) }
+        if index == focusedSliceIndex { pushTransmitFrequency() }
     }
 
     func setSliceMode(_ index: Int, _ newMode: RadioMode) {
@@ -947,6 +1245,64 @@ final class RadioSession {
         Task { await conn?.setPan(p, slice: index) }
     }
 
+    /// Focuses `index`, which also re-points the transmitter at that slice (PTT
+    /// always transmits on the slice you're looking at). Ignored while keyed —
+    /// switching VFOs mid-transmission would yank the live TX frequency out from
+    /// under an in-progress transmission.
+    func setFocusedSlice(_ index: Int) {
+        guard sliceIndices.contains(index) else { return }
+        guard !isTransmitting, !isTuning else { return }
+        focusedSliceIndex = index
+        followTransmitToFocusedSlice()
+    }
+
+    private func followTransmitToFocusedSlice() {
+        let index = focusedSliceIndex
+        let hz = effectiveTransmitHz
+        let m = mode(forSlice: index)
+        let conn = connection
+        Task { await conn?.setTransmitSlice(index, frequency: hz, mode: m) }
+    }
+
+    func frequency(forSlice index: Int) -> UInt32 {
+        guard index != 0 else { return frequencyHz }
+        return extraSlices.first(where: { $0.id == index })?.frequencyHz ?? frequencyHz
+    }
+
+    func mode(forSlice index: Int) -> RadioMode {
+        guard index != 0 else { return mode }
+        return extraSlices.first(where: { $0.id == index })?.mode ?? mode
+    }
+
+    func volume(forSlice index: Int) -> Float {
+        guard index != 0 else { return volume }
+        return extraSlices.first(where: { $0.id == index })?.volume ?? volume
+    }
+
+    func setFrequency(_ hz: UInt32, forSlice index: Int) {
+        if index == 0 {
+            setFrequency(hz)
+        } else {
+            setSliceFrequency(index, hz)
+        }
+    }
+
+    func setMode(_ newMode: RadioMode, forSlice index: Int) {
+        if index == 0 {
+            setMode(newMode)
+        } else {
+            setSliceMode(index, newMode)
+        }
+    }
+
+    func setVolume(_ newVolume: Float, forSlice index: Int) {
+        if index == 0 {
+            setVolume(newVolume)
+        } else {
+            setSliceVolume(index, newVolume)
+        }
+    }
+
     /// Connects to the last radio if disconnected, or disconnects if connected.
     func toggleConnection() {
         if isConnected {
@@ -966,7 +1322,10 @@ final class RadioSession {
             }
         } else if id.hasPrefix("mode.") {
             let raw = String(id.dropFirst("mode.".count))
-            if let newMode = RadioMode(rawValue: raw) { setMode(newMode) }
+            if let newMode = RadioMode(rawValue: raw) { setMode(newMode, forSlice: focusedSliceIndex) }
+        } else if id.hasPrefix("slice.") {
+            let raw = String(id.dropFirst("slice.".count))
+            if let index = Int(raw) { setFocusedSlice(index) }
         } else {
             switch id {
             case "tune.up":         tuneBy(steps: 1)
@@ -1007,6 +1366,8 @@ final class RadioSession {
         let snrGain = spectralNRGainMethod
         let snrNPE = spectralNRNPEMethod
         let snrArt = spectralNRArtifact
+        let snrPost = spectralNRPost
+        let snrPostFactor = spectralNRPostFactor
         let anr = lmsNR
         let anrStrength = lmsNRStrength
         let nr3On = nr3
@@ -1021,6 +1382,8 @@ final class RadioSession {
         let snbOn = snb
         let apfOn = apf
         let apfBW = apfBandwidth
+        let binauralOn = binaural
+        let amSB = amSideband
         let notches = manualNotches.map { (freq: $0.frequencyHz, width: $0.widthHz, active: $0.active) }
         let notchRun = manualNotchOn
         let notchTuneFreq = Double(frequencyHz)
@@ -1060,6 +1423,8 @@ final class RadioSession {
             await conn?.setSpectralNRGainMethod(snrGain)
             await conn?.setSpectralNRNPEMethod(snrNPE)
             await conn?.setSpectralNRArtifactReduction(snrArt)
+            await conn?.setSpectralNRPostFactor(snrPostFactor)
+            await conn?.setSpectralNRPost(snrPost)
             await conn?.setSpectralNR(snr)
             await conn?.setANRStrength(anrStrength)
             await conn?.setANR(anr)
@@ -1075,6 +1440,8 @@ final class RadioSession {
             await conn?.setSNB(snbOn)
             await conn?.setAPFBandwidth(apfBW)
             await conn?.setAPF(apfOn)
+            await conn?.setBinaural(binauralOn)
+            await conn?.setAMSideband(amSB)
             await conn?.setTuneFrequency(notchTuneFreq)
             await conn?.setManualNotches(notches)
             await conn?.setManualNotchRun(notchRun)
@@ -1113,7 +1480,13 @@ final class RadioSession {
     }
 }
 
-// The CAT command surface. Everything but signalRMS is satisfied by existing members.
+// The CAT command surface. Mostly satisfied by existing members.
 extension RadioSession: CATRadioControl {
     var signalRMS: Float { lastUpdate?.signalRMS ?? 0 }
+    /// Kenwood models one shared RIT/XIT offset register; report whichever is engaged.
+    var ritOffsetHz: Int { xitOn && !ritOn ? xitHz : ritHz }
+    func setRITXITOffset(_ hz: Int) {
+        setRITOffset(hz)
+        setXITOffset(hz)
+    }
 }

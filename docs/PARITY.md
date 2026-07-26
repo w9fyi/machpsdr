@@ -28,7 +28,10 @@ Legend: ✅ implemented in machpsdr · ⬜ to do · ➖ not applicable to the AN
   0–100 level; ⬜ SSB voice squelch (SSQL is not in the vendored WDSP build)
 - ✅ RX EQ (3-band); ⬜ parametric 5/10/18-band with Q
 - ➖ Diversity reception (10E has a single ADC)
-- ⬜ Binaural (BIN) rendering `[WDSP]`
+- ✅ Binaural (BIN) rendering — Slice A, interleaved-stereo ring into the mixer
+  (live verify pending)
+- ✅ AM/SAM sideband select (Both/LSB/USB, `SetRXAAMDSBMode`) — Sideband picker
+  appears with the AM/SAM bandwidth filter (live verify pending)
 - ✅ Per-slice stereo pan
 
 ## 2. TX
@@ -50,10 +53,13 @@ CFC (+post-EQ) → bandpass → COMP → aux bandpass → CESSB.
 - ✅ Leveler (on/off + max-gain ceiling) `[WDSP]`
 - ✅ Phase rotator (on/off) `[WDSP]`
 - ⬜ Voice keyer / wave playback + macros
-- ⬜ PureSignal — 10E: works on many (not all) bands via internal TX→RX crosstalk, no
-  coupler; clean path is an external coupler (e.g. TAPR TR-Plus). Under Protocol 1 the
-  feedback stream is exposed as an extra receiver (P1 gateware uses the 4th/5th RX);
-  classic P1 requirements: 192 kHz + DUP. `[WDSP: calcc/iqc + FW]`
+- ✅ PureSignal (Single Cal) — implemented per piHPSDR's P1 mapping for the
+  10E/100B: RX1 = RF sampler, RX2 = TX DAC feedback (HL2: RX3/RX4), both NCOs
+  follow TX frequency during MOX; feedback → WDSP `pscc`/calcc, iqc correction in
+  TXA. Arm requires 192 kHz + 2 slices (10E). Single Cal only — continuous cal
+  shows the known picket-fence artifact on 10E-class boards. On-air verify pending.
+  Crosstalk path works on many (not all) bands; clean path is an external coupler
+  (e.g. TAPR TR-Plus). ⬜ save/restore correction (PSSaveCorr), auto-attenuation
 
 ## 3. CW
 
@@ -73,21 +79,26 @@ CFC (+post-EQ) → bandpass → COMP → aux bandpass → CESSB.
 - ⬜ Zoom / pan over acquired bandwidth
 - ⬜ CTUN (fixed panadapter, movable VFO)
 - ⬜ dB grid labels, band-edge markers, TX passband overlay, DX spots
-- ⬜ Wideband display (0–61 MHz bandscope, EP4) `[FW: wideband flag already in startCommand]`
+- ⬜ Wideband display (0–61 MHz bandscope, EP4). ✅ EP4 probe (Live Stream ▸
+  Wideband Probe) counts arriving frames — whether the 10E's shrunken EP3C25
+  firmware kept the bandscope is unverified; run the probe to find out
 - ⬜ Waterfall palettes (custom gradients), auto floor, speed control
 - ⬜ TX spectral display during MOX; pause/freeze
 - ⬜ Metal rendering for high-FPS/zoom (current: CPU Canvas + CGImage)
 
 ## 5. Operating
 
-- ⬜ VFO A/B (A>B, B>A, swap, lock, sync)
-- ⬜ Split (TX on VFO B)
-- ⬜ RIT / XIT
+- ✅ VFO A/B (A→B, A⇄B swap; VFO B field in Tuning); ⬜ lock, sync
+- ✅ Split (TX on VFO B) — also over CAT (FT0/FT1, FB); live verify pending
+- ✅ RIT / XIT (±2 kHz sliders; RIT shifts Slice A RX NCO, XIT shifts TX NCO;
+  CAT RT/XT/RU/RD/RC + IF fields); live verify pending
 - ✅ Band buttons (12 bands via shortcuts); ⬜ band-stack registers (multi-entry cycling)
 - ⬜ Memory channels (list, groups, quick-save/restore)
 - ⬜ Tune step list + mouse-wheel tuning + snap-to-step (have: MIDI step tuning)
-- ✅ MultiRX: up to 4 hardware DDCs as independent slices with pan (exceeds Thetis's sub-RX
-  model in some ways; 2-RX P1 framing fix pending live test)
+- ✅ MultiRX: independent slices with pan (exceeds Thetis's sub-RX model in some
+  ways; 2-RX P1 framing fix pending live test). Hardware ceiling: the original
+  10E's EP3C25 gateware has only 2 DDCs (ANAN-10: 7, HL2: 4) — a 3rd slice will
+  never decode on the 10E
 - ✅ Modes: LSB/USB/CWL/CWU/AM/SAM/FM/DIGL/DIGU; ⬜ DSB/SPEC/DRM, FM repeater offsets/CTCSS
 - ✅ Mute; ⬜ per-slice mute buttons
 - ✅ Step attenuator 0–31 dB
@@ -111,8 +122,9 @@ CFC (+post-EQ) → bandpass → COMP → aux bandpass → CESSB.
 
 - ✅ CAT server — Kenwood TS-2000 emulation (ID 019) over TCP (default port 13013):
   FA/FB/MD/IF/TX/RX/PC/AG/SM + ID/PS/AI/FR/FT; live-verified from a LAN client
-  (drives the SPE 2K-FA via a Raspberry Pi bridge). ⬜ ZZxx extended set, PTY
-  virtual serial, AI auto-information push
+  (drives the SPE 2K-FA via a Raspberry Pi bridge). Split/RIT/XIT now real:
+  FT0/FT1 keys split, FB sets VFO B, RT/XT/RU/RD/RC drive RIT/XIT, IF carries
+  offset + flags. ⬜ ZZxx extended set, PTY virtual serial, AI auto-information push
 - ✅ MIDI tuning knob; ⬜ general MIDI mapping (buttons/knobs/wheels → commands)
 - ⬜ TCI server (WebSocket; spots, audio/IQ streaming) — modern loggers/SDR tools speak it
 - ⬜ Virtual audio routing (VAC equivalent) — macOS: Core Audio aggregate/driver or

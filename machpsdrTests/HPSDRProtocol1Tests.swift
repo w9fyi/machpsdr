@@ -128,6 +128,32 @@ import Foundation
         #expect(rx1.1 == 0x55 && rx1.2 == 0x66 && rx1.3 == 0x77 && rx1.4 == 0x88)
     }
 
+    @Test func pureSignalRetunesFeedbackReceiversOnlyDuringMox() {
+        var s = RadioSettings()
+        s.receiverCount = 2
+        s.receiverFrequencies = [0x1122_3344, 0x5566_7788]
+        s.transmitFrequency = 0x0072_5000
+        s.puresignal = true
+        s.psRxFeedback = 0
+        s.psTxFeedback = 1
+
+        // Receiving: both NCOs stay on their own frequencies.
+        var rx0 = s.commandBytes(slot: 4)
+        #expect(rx0.1 == 0x11 && rx0.2 == 0x22 && rx0.3 == 0x33 && rx0.4 == 0x44)
+
+        // Transmitting: both feedback receivers follow the TX frequency.
+        s.mox = true
+        rx0 = s.commandBytes(slot: 4)
+        let rx1 = s.commandBytes(slot: 5)
+        #expect(rx0.1 == 0x00 && rx0.2 == 0x72 && rx0.3 == 0x50 && rx0.4 == 0x00)
+        #expect(rx1.1 == 0x00 && rx1.2 == 0x72 && rx1.3 == 0x50 && rx1.4 == 0x00)
+
+        // PS disarmed: MOX alone must not retune any receiver.
+        s.puresignal = false
+        rx0 = s.commandBytes(slot: 4)
+        #expect(rx0.1 == 0x11 && rx0.2 == 0x22 && rx0.3 == 0x33 && rx0.4 == 0x44)
+    }
+
     @Test func commandSlotCountTracksReceivers() {
         var s = RadioSettings()
         s.receiverCount = 3

@@ -18,6 +18,18 @@ struct LiveStatusSectionView: View {
                 .foregroundStyle((update?.status.ptt ?? false) ? .red : .secondary)
         }
         SignalMeterView(rms: update?.signalRMS ?? 0)
+        Toggle("Wideband Probe (EP4)", isOn: Binding(
+            get: { session.widebandProbe },
+            set: { session.setWidebandProbe($0) }
+        ))
+        if session.widebandProbe {
+            let rate = update?.widebandPacketsPerSecond ?? 0
+            LabeledContent("EP4 Packets") {
+                Text(rate > 0 ? "\(rate) /s — firmware has the bandscope!" : "0 /s — nothing yet")
+                    .foregroundStyle(rate > 0 ? .green : .secondary)
+                    .monospacedDigit()
+            }
+        }
     }
 }
 

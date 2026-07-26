@@ -10,11 +10,21 @@ private final class MockRadio: CATRadioControl {
     var driveLevel: Double = 10
     var volume: Float = 0.5
     var signalRMS: Float = 0
+    var vfoBHz: UInt32 = 7_074_000
+    var splitOn = false
+    var ritOn = false
+    var xitOn = false
+    var ritOffsetHz = 0
     func setFrequency(_ hz: UInt32) { frequencyHz = hz }
     func setMode(_ newMode: RadioMode) { mode = newMode }
     func setPTT(_ on: Bool) { isTransmitting = on }
     func setDrive(_ percent: Double) { driveLevel = percent }
     func setVolume(_ newVolume: Float) { volume = newVolume }
+    func setVFOB(_ hz: UInt32) { vfoBHz = hz }
+    func setSplit(_ on: Bool) { splitOn = on }
+    func setRIT(_ on: Bool) { ritOn = on }
+    func setXIT(_ on: Bool) { xitOn = on }
+    func setRITXITOffset(_ hz: Int) { ritOffsetHz = hz }
 }
 
 @Suite @MainActor struct CATCommandProcessorTests {
@@ -84,12 +94,54 @@ private final class MockRadio: CATRadioControl {
         #expect(chars[29] == "2")   // P9 mode = USB
     }
 
-    @Test func vfoBIsAShadowRegister() {
-        let processor = cat   // keep one instance so the shadow persists
-        #expect(processor.handle("FB") == "FB00007074000;")   // defaults to VFO A
-        #expect(processor.handle("FB00014074000") == "")
-        #expect(processor.handle("FB") == "FB00014074000;")
-        #expect(radio.frequencyHz == 7_074_000)               // radio untouched
+    @Test func vfoBReadsAndWritesTheRealVFOB() {
+        #expect(cat.handle("FB") == "FB00007074000;")
+        #expect(cat.handle("FB00014074000") == "")
+        #expect(radio.vfoBHz == 14_074_000)
+        #expect(radio.frequencyHz == 7_074_000)               // VFO A untouched
+    }
+
+    @Test func splitViaFT() {
+        #expect(cat.handle("FT1") == "")
+        #expect(radio.splitOn)
+        #expect(cat.handle("FT") == "FT1;")
+        #expect(cat.handle("FT0") == "")
+        #expect(!radio.splitOn)
+        #expect(cat.handle("FT2") == "?;")
+    }
+
+    @Test func ritAndXitOnOff() {
+        #expect(cat.handle("RT1") == "")
+        #expect(radio.ritOn)
+        #expect(cat.handle("RT") == "RT1;")
+        #expect(cat.handle("XT1") == "")
+        #expect(radio.xitOn)
+        #expect(cat.handle("RT0") == "")
+        #expect(!radio.ritOn)
+    }
+
+    @Test func ritOffsetStepsAndClears() {
+        #expect(cat.handle("RU") == "")           // bare step = +10 Hz
+        #expect(radio.ritOffsetHz == 10)
+        #expect(cat.handle("RD00050") == "")      // explicit step
+        #expect(radio.ritOffsetHz == -40)
+        #expect(cat.handle("RC") == "")
+        #expect(radio.ritOffsetHz == 0)
+        #expect(cat.handle("RUx") == "?;")
+    }
+
+    @Test func ifStatusCarriesRitXitAndSplit() {
+        radio.ritOn = true
+        radio.xitOn = true
+        radio.splitOn = true
+        radio.ritOffsetHz = -150
+        let reply = cat.handle("IF")
+        #expect(reply.count == 38)
+        let chars = Array(reply)
+        #expect(String(chars[17...22]) == "-00150")   // P3 offset
+        #expect(chars[23] == "1")                     // P4 RIT
+        #expect(chars[24] == "1")                     // P5 XIT
+        #expect(chars[32] == "1")                     // P12 split
     }
 
     @Test func drivePowerReadAndWrite() {

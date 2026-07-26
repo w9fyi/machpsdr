@@ -23,6 +23,7 @@ nonisolated enum HPSDRProtocol1 {
     static let packetTypeData: UInt8 = 0x01
     static let endpointToRadio: UInt8 = 0x02   // EP2
     static let endpointFromRadio: UInt8 = 0x06 // EP6
+    static let endpointWideband: UInt8 = 0x04  // EP4: raw ADC bandscope samples
 
     /// Sample rates selectable via the configuration command (C0 = 0x00, C1 bits 0–1).
     enum SampleRate: UInt8, CaseIterable {
@@ -98,6 +99,17 @@ nonisolated struct RadioSettings {
     /// Radio clock error in ppm (positive = radio's TCXO runs high). NCO frequencies
     /// are pre-divided by (1 + ppm/1e6) so the radio lands on the displayed frequency.
     var frequencyCalibrationPPM: Double = 0
+    /// Requests the EP4 wideband (raw ADC) stream in the Metis start command.
+    /// Experimental on the original ANAN-10E: its shrunken EP3C25 firmware may not
+    /// implement the bandscope at all — the probe counter shows whether frames arrive.
+    var wideband: Bool = false
+    /// PureSignal: while transmitting, the feedback receivers' NCOs follow the TX
+    /// frequency. Protocol 1 has no PS enable bit for Hermes-class gateware — the
+    /// feedback simply arrives on fixed receiver slots (per piHPSDR's mapping:
+    /// ANAN-10E/100B use RX1 = RF sampler + RX2 = TX DAC; HL2 uses RX3 + RX4).
+    var puresignal: Bool = false
+    var psRxFeedback: Int = 0
+    var psTxFeedback: Int = 1
     /// True when driving a Hermes Lite 2, whose gateware repurposes parts of the
     /// protocol: the OC bits select the N2ADR filter board's LPF (derived from the
     /// TX frequency, ignoring `openCollector`), and the drive command must set the
@@ -147,10 +159,15 @@ nonisolated struct RadioSettings {
             }
             return (0x14 | moxBit, 0x00, 0x00, 0x00, 0x20 | (rxAttenuator & 0x1F))
         default:
-            // RX NCO frequency: C0 = 0x04 + receiverIndex*2.
+            // RX NCO frequency: C0 = 0x04 + receiverIndex*2. During PureSignal
+            // transmit, the feedback receivers are retuned to the TX frequency
+            // (they revert as soon as MOX drops and this slot cycles again).
             let rx = slot - 4
             let c0 = UInt8(0x04 + rx * 2) | moxBit
-            let hz = rx < receiverFrequencies.count ? receiverFrequencies[rx] : (receiverFrequencies.first ?? 0)
+            var hz = rx < receiverFrequencies.count ? receiverFrequencies[rx] : (receiverFrequencies.first ?? 0)
+            if mox && puresignal && (rx == psRxFeedback || rx == psTxFeedback) {
+                hz = transmitFrequency
+            }
             return Self.frequencyCommand(c0: c0, hz: calibrated(hz))
         }
     }

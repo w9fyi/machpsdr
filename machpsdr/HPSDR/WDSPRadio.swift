@@ -109,7 +109,8 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private let ring: AudioRingBuffer
     private var isOpen = false
 
-    /// Optional secondary sink for demodulated audio (FT8 decoder tap).
+    /// Optional secondary sink for demodulated audio (FT8 decoder tap),
+    /// written before the volume gain so mute doesn't silence the decoder.
     /// Set and read on the I/O thread via the DSP command queue.
     var tapRing: AudioRingBuffer?
 
@@ -117,6 +118,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private var outBuffer: [Double]
     private var fill = 0
     private var audioScratch: [Float]
+    private var stereoScratch: [Float]
     // Partial boxcar-decimation group carried across process() calls. Packets don't
     // arrive in multiples of the decimation factor (126 complex samples at 192/384 kHz),
     // so the tail of one packet must combine with the head of the next — discarding it
@@ -136,9 +138,11 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
 
     // Noise reduction (RXA): EMNR spectral subtraction, ANR (LMS), ANF (auto-notch).
     private var emnrOn = false
-    private var emnrGainMethod: Int32 = 2    // 0 linear, 1 log, 2 gamma (WDSP default)
-    private var emnrNPEMethod: Int32 = 0     // noise-power estimator: 0 OSMS, 1 MMSE
+    private var emnrGainMethod: Int32 = 2    // 0 linear, 1 log, 2 gamma, 3 trained
+    private var emnrNPEMethod: Int32 = 0     // noise-power estimator: 0 OSMS, 1 MMSE, 2 NSTAT
     private var emnrArtifact = true          // artifact (musical-noise) elimination
+    private var emnrPost2On = false          // psychoacoustic post-processing (WDSP 1.27+)
+    private var emnrPost2Factor = 0.15       // post-processing strength (WDSP default)
     private var anrOn = false
     private var anrTaps: Int32 = 64          // ANR LMS filter length (strength)
     private var rnnrOn = false               // NR3: RNNoise neural denoiser
@@ -175,6 +179,12 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     private var apfOn = false
     private var apfBandwidth: Double = 100
 
+    // Binaural: WDSP's patchpanel feeds the demodulator's quadrature pair to L/R
+    // instead of duplicated mono. While on, the ring carries interleaved stereo.
+    private var binauralOn = false
+    // AM/SAM sideband selection: 0 = both (DSB), 1 = LSB only, 2 = USB only.
+    private var amSideband: Int32 = 0
+
     init(ring: AudioRingBuffer, channelID: Int32 = 0, nbID: Int32 = 0) {
         self.ring = ring
         self.channelID = channelID
@@ -182,6 +192,7 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         inBuffer = [Double](repeating: 0, count: WDSPRadio.bufferSize * 2)
         outBuffer = [Double](repeating: 0, count: WDSPRadio.bufferSize * 2)
         audioScratch = [Float](repeating: 0, count: WDSPRadio.bufferSize)
+        stereoScratch = [Float](repeating: 0, count: WDSPRadio.bufferSize * 2)
     }
 
     func open(mode: RadioMode) {
@@ -201,7 +212,12 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         create_nobEXT(nbID, 0, nb2Mode, Int32(Self.bufferSize), Double(Self.audioRate),
                       0.0001, 0.0001, 0.0001, 0.005, nb2Threshold)
         applyAGC()
-        SetRXAPanelGain1(channelID, volume)
+        // Volume is applied in process() after the FT8 tap, not in the WDSP
+        // chain: the decoder must keep hearing full-scale audio when the
+        // operator mutes or turns the speakers down.
+        SetRXAPanelGain1(channelID, 1.0)
+        SetRXAPanelBinaural(channelID, binauralOn ? 1 : 0)
+        SetRXAAMDSBMode(channelID, amSideband)
         self.mode = mode
         resetFilterDefaults()
         isOpen = true
@@ -257,7 +273,6 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
 
     func setVolume(_ v: Float) {
         volume = Double(max(0, min(1, v)))
-        if isOpen { SetRXAPanelGain1(channelID, volume) }
     }
 
     /// AGC time-constant profile: 0 off, 1 long, 2 slow, 3 medium, 4 fast.
@@ -299,6 +314,19 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
     func setSpectralNRArtifactReduction(_ on: Bool) {
         emnrArtifact = on
         if isOpen { SetRXAEMNRaeRun(channelID, on ? 1 : 0) }
+    }
+
+    /// EMNR psychoacoustic post-processing: masks residual musical noise under a
+    /// shaped comfort-noise floor instead of leaving spectral holes.
+    func setSpectralNRPost(_ on: Bool) {
+        emnrPost2On = on
+        if isOpen { SetRXAEMNRpost2Run(channelID, on ? 1 : 0) }
+    }
+
+    /// Psychoacoustic post-processing strength (0 = off ... 0.5 = heavy fill).
+    func setSpectralNRPostFactor(_ factor: Double) {
+        emnrPost2Factor = max(0, min(0.5, factor))
+        if isOpen { SetRXAEMNRpost2Factor(channelID, emnrPost2Factor) }
     }
 
     /// ANR: LMS (least-mean-squares) broadband noise reduction.
@@ -368,6 +396,21 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         SetRXASPCWBandwidth(channelID, apfBandwidth)
         SetRXASPCWGain(channelID, 2.0)
         SetRXASPCWRun(channelID, apfOn ? 1 : 0)
+    }
+
+    /// Binaural rendering. The caller (RadioConnection) owns the ring/mixer format
+    /// switch — this only flips the WDSP patchpanel and the process() write format,
+    /// so it must run in the same DSP command as the ring reset and mixer update.
+    func setBinaural(_ on: Bool) {
+        binauralOn = on
+        if isOpen { SetRXAPanelBinaural(channelID, on ? 1 : 0) }
+    }
+
+    /// AM/SAM sideband selection: 0 = both (DSB), 1 = LSB only, 2 = USB only.
+    /// Rejects an adjacent-channel interferer by demodulating just one sideband.
+    func setAMSideband(_ mode: Int) {
+        amSideband = Int32(max(0, min(2, mode)))
+        if isOpen { SetRXAAMDSBMode(channelID, amSideband) }
     }
 
     /// Rebuilds WDSP's notch database from the current `manualNotches` (delete-all then
@@ -472,6 +515,8 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
         SetRXAEMNRgainMethod(channelID, emnrGainMethod)
         SetRXAEMNRnpeMethod(channelID, emnrNPEMethod)
         SetRXAEMNRaeRun(channelID, emnrArtifact ? 1 : 0)
+        SetRXAEMNRpost2Factor(channelID, emnrPost2Factor)
+        SetRXAEMNRpost2Run(channelID, emnrPost2On ? 1 : 0)
         SetRXAEMNRRun(channelID, emnrOn ? 1 : 0)
         SetRXAANRVals(channelID, anrTaps, 16, 0.0001, 0.1)
         SetRXAANRRun(channelID, anrOn ? 1 : 0)
@@ -529,10 +574,25 @@ nonisolated final class WDSPRadio: @unchecked Sendable {
                     }
                     var error: Int32 = 0
                     fexchange0(channelID, &inBuffer, &outBuffer, &error)
-                    // WDSP output is interleaved stereo; take the left lane (mono path).
-                    vDSP_vdpsp(outBuffer, 2, &audioScratch, 1, vDSP_Length(Self.bufferSize))
-                    ring.write(audioScratch)
-                    tapRing?.write(audioScratch)
+                    // Tap first (full scale, always mono left lane), then volume for
+                    // the speaker path — muting must not silence the FT8 decoder.
+                    if tapRing != nil {
+                        vDSP_vdpsp(outBuffer, 2, &audioScratch, 1, vDSP_Length(Self.bufferSize))
+                        tapRing?.write(audioScratch)
+                    }
+                    var gain = Float(volume)
+                    if binauralOn {
+                        // Binaural: keep WDSP's interleaved stereo; the mixer reads
+                        // this slice's ring as L/R pairs.
+                        vDSP_vdpsp(outBuffer, 1, &stereoScratch, 1, vDSP_Length(Self.bufferSize * 2))
+                        vDSP_vsmul(stereoScratch, 1, &gain, &stereoScratch, 1, vDSP_Length(Self.bufferSize * 2))
+                        ring.write(stereoScratch)
+                    } else {
+                        // Mono path: take the left lane.
+                        vDSP_vdpsp(outBuffer, 2, &audioScratch, 1, vDSP_Length(Self.bufferSize))
+                        vDSP_vsmul(audioScratch, 1, &gain, &audioScratch, 1, vDSP_Length(Self.bufferSize))
+                        ring.write(audioScratch)
+                    }
                     fill = 0
                 }
             }

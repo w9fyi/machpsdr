@@ -30,6 +30,8 @@ nonisolated final class SliceAudioMixer: @unchecked Sendable {
     private var panL: [Float]
     private var panR: [Float]
     private var enabled: [Bool]
+    /// True when a slice's ring carries interleaved stereo (binaural) instead of mono.
+    private var stereo: [Bool]
 
     // Diagnostics: frames rendered and real (non-silence) samples pulled per slice.
     // The render callback only bumps these counters; a 1 Hz timer formats and logs
@@ -45,6 +47,7 @@ nonisolated final class SliceAudioMixer: @unchecked Sendable {
         panL = [Float](repeating: 1, count: Self.capacity)
         panR = [Float](repeating: 1, count: Self.capacity)
         enabled = [Bool](repeating: false, count: Self.capacity)
+        stereo = [Bool](repeating: false, count: Self.capacity)
         dbgReal = [Int](repeating: 0, count: Self.capacity)
 
         scratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchCapacity)
@@ -69,15 +72,26 @@ nonisolated final class SliceAudioMixer: @unchecked Sendable {
         return (min(1, 1 - p), min(1, 1 + p))
     }
 
-    /// Registers (or updates) a slice's audio source.
-    func setSlice(_ index: Int, ring: AudioRingBuffer, pan: Float, enabled on: Bool) {
+    /// Registers (or updates) a slice's audio source. `stereo` marks the ring as
+    /// interleaved L/R (binaural) instead of mono.
+    func setSlice(_ index: Int, ring: AudioRingBuffer, pan: Float, stereo isStereo: Bool = false,
+                  enabled on: Bool) {
         guard index >= 0, index < Self.capacity else { return }
         let w = Self.panWeights(pan)
         os_unfair_lock_lock(&lock)
         rings[index] = ring
         panL[index] = w.left
         panR[index] = w.right
+        stereo[index] = isStereo
         enabled[index] = on
+        os_unfair_lock_unlock(&lock)
+    }
+
+    /// Switches an existing slice between mono and interleaved-stereo ring format.
+    func setSliceStereo(_ index: Int, _ isStereo: Bool) {
+        guard index >= 0, index < Self.capacity else { return }
+        os_unfair_lock_lock(&lock)
+        stereo[index] = isStereo
         os_unfair_lock_unlock(&lock)
     }
 
@@ -176,11 +190,20 @@ nonisolated final class SliceAudioMixer: @unchecked Sendable {
         os_unfair_lock_lock(&lock)
         for idx in 0..<Self.capacity {
             guard enabled[idx], let ring = rings[idx] else { continue }
-            let real = ring.read(into: scratch, count: n)
-            dbgReal[idx] += real
             var pl = panL[idx], pr = panR[idx]
-            vDSP_vsma(scratch, 1, &pl, left, 1, left, 1, vDSP_Length(n))
-            vDSP_vsma(scratch, 1, &pr, right, 1, right, 1, vDSP_Length(n))
+            if stereo[idx] {
+                // Interleaved L/R (binaural): de-interleave with stride-2 accumulate.
+                let n2 = min(2 * n, scratchCapacity)
+                let real = ring.read(into: scratch, count: n2)
+                dbgReal[idx] += real / 2
+                vDSP_vsma(scratch, 2, &pl, left, 1, left, 1, vDSP_Length(n2 / 2))
+                vDSP_vsma(scratch + 1, 2, &pr, right, 1, right, 1, vDSP_Length(n2 / 2))
+            } else {
+                let real = ring.read(into: scratch, count: n)
+                dbgReal[idx] += real
+                vDSP_vsma(scratch, 1, &pl, left, 1, left, 1, vDSP_Length(n))
+                vDSP_vsma(scratch, 1, &pr, right, 1, right, 1, vDSP_Length(n))
+            }
         }
         dbgFrames += n
         os_unfair_lock_unlock(&lock)

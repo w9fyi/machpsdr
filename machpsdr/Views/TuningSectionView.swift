@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Tuning section rows: focused-slice frequency entry, sample rate, mode, filters,
+/// Tuning section rows: focused-slice frequency entry, sample rate, mode,
 /// volume/mute, and MIDI tuning step. The frequency field keeps a local `@State`
 /// edit buffer synced from the model, so live re-renders can't clobber typing.
 struct TuningSectionView: View {
@@ -8,6 +8,8 @@ struct TuningSectionView: View {
 
     /// Frequency shown in the text field, in MHz.
     @State private var frequencyMHz: Double = 7.1
+    /// VFO B (split transmit) frequency field, in MHz.
+    @State private var vfoBMHz: Double = 7.1
 
     private var focusedSlice: Int { session.focusedSliceIndex }
 
@@ -31,6 +33,36 @@ struct TuningSectionView: View {
         .onChange(of: focusedSlice) { _, _ in syncFrequencyField() }
         .onAppear { syncFrequencyField() }
 
+        HStack {
+            Toggle("Split", isOn: Binding(
+                get: { session.splitOn },
+                set: { session.setSplit($0) }
+            ))
+            .help("Transmit on VFO B while receiving on the focused slice.")
+            Spacer()
+            Text("VFO B").foregroundStyle(.secondary)
+            TextField("MHz", value: $vfoBMHz, format: .number.precision(.fractionLength(6)))
+                .frame(width: 120)
+                .multilineTextAlignment(.trailing)
+                .onSubmit {
+                    session.setVFOB(UInt32((vfoBMHz * 1_000_000).rounded()))
+                }
+            Text("MHz").foregroundStyle(.secondary)
+            Button("A→B") { session.copyAToB() }
+                .help("Copy the focused slice's frequency into VFO B")
+            Button("A⇄B") { session.swapAB() }
+                .help("Swap VFO A (Slice A) and VFO B")
+        }
+        .onChange(of: session.vfoBHz) { _, newValue in
+            vfoBMHz = Double(newValue) / 1_000_000
+        }
+        .onAppear { vfoBMHz = Double(session.vfoBHz) / 1_000_000 }
+
+        offsetRow("RIT", on: session.ritOn, offset: session.ritHz,
+                  setOn: { session.setRIT($0) }, setOffset: { session.setRITOffset($0) })
+        offsetRow("XIT", on: session.xitOn, offset: session.xitHz,
+                  setOn: { session.setXIT($0) }, setOffset: { session.setXITOffset($0) })
+
         Picker("Sample Rate", selection: Binding(
             get: { session.sampleRate },
             set: { session.setSampleRate($0) }
@@ -49,13 +81,6 @@ struct TuningSectionView: View {
                 Text(mode.rawValue).tag(mode)
             }
         }
-        if focusedSlice == 0 {
-            RXFilterControlsView(session: session)
-        } else {
-            Text("Slice filters follow the receiver mode; full RX filter shaping is available on Slice A.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
         HStack {
             Button {
                 if focusedSlice == 0 { session.setMute(!session.muted) }
@@ -65,18 +90,45 @@ struct TuningSectionView: View {
             }
             .buttonStyle(.borderless)
             .disabled(focusedSlice != 0)
-            .accessibilityLabel(session.muted ? "Unmute" : "Mute")
+            .accessibilityLabel(session.muted && focusedSlice == 0 ? "Unmute" : "Mute")
             Slider(value: Binding(
                 get: { Double(session.volume(forSlice: focusedSlice)) },
                 set: { session.setVolume(Float($0), forSlice: focusedSlice) }
             ), in: 0...1)
             Image(systemName: "speaker.wave.3.fill")
         }
+        Toggle("Binaural Audio", isOn: Binding(
+            get: { session.binaural },
+            set: { session.setBinaural($0) }
+        ))
+        .help("Spatial stereo rendering of Slice A — helps pull weak CW/SSB out of the noise by ear.")
         MIDITuningStepSectionView(session: session)
     }
 
     private func syncFrequencyField() {
         frequencyMHz = Double(session.frequency(forSlice: focusedSlice)) / 1_000_000
+    }
+
+    /// One RIT/XIT row: enable toggle, ±2 kHz slider, live value, and a clear button.
+    private func offsetRow(_ label: String, on: Bool, offset: Int,
+                           setOn: @escaping (Bool) -> Void,
+                           setOffset: @escaping (Int) -> Void) -> some View {
+        HStack {
+            Toggle(label, isOn: Binding(get: { on }, set: { setOn($0) }))
+            Slider(value: Binding(
+                get: { Double(offset) },
+                set: { setOffset(Int(($0 / 10).rounded()) * 10) }
+            ), in: -2000...2000)
+            .disabled(!on)
+            Text("\(offset >= 0 ? "+" : "")\(offset) Hz")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 76, alignment: .trailing)
+            Button("Clear") { setOffset(0) }
+                .buttonStyle(.borderless)
+                .disabled(offset == 0)
+                .accessibilityLabel("Clear \(label) offset")
+        }
     }
 }
 
@@ -94,6 +146,17 @@ struct RXFilterControlsView: View {
             labeledSlider("High Cut", value: session.filterHigh, range: session.mode.highCutRange) { session.setHighCut($0) }
         case .bandwidth:
             labeledSlider("Bandwidth", value: session.filterHigh, range: session.mode.highCutRange) { session.setHighCut($0) }
+            if session.mode == .am || session.mode == .sam {
+                Picker("Sideband", selection: Binding(
+                    get: { session.amSideband },
+                    set: { session.setAMSideband($0) }
+                )) {
+                    Text("Both").tag(0)
+                    Text("LSB").tag(1)
+                    Text("USB").tag(2)
+                }
+                .help("Demodulate one sideband only to dodge an adjacent-channel interferer.")
+            }
         }
     }
 

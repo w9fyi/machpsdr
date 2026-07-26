@@ -34,10 +34,20 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
     private var outBuffer: [Double]     // interleaved TX I/Q
     private var iqScratch: [Float]
 
+    // PureSignal feedback assembly: interleaved I/Q pairs (at the RX stream rate)
+    // accumulate into fixed 1024-sample blocks for pscc — the size WDSP's calcc
+    // was created with in TXA.c.
+    static let psBlockSize = 1024
+    private var psTxBuf: [Double]       // TX DAC feedback (reference)
+    private var psRxBuf: [Double]       // RF sampler feedback
+    private var psFill = 0
+
     init() {
         inBuffer = [Double](repeating: 0, count: WDSPTransmit.bufferSize * 2)
         outBuffer = [Double](repeating: 0, count: WDSPTransmit.bufferSize * 2)
         iqScratch = [Float](repeating: 0, count: WDSPTransmit.bufferSize * 2)
+        psTxBuf = [Double](repeating: 0, count: WDSPTransmit.psBlockSize * 2)
+        psRxBuf = [Double](repeating: 0, count: WDSPTransmit.psBlockSize * 2)
     }
 
     func open(mode: RadioMode) {
@@ -231,5 +241,68 @@ nonisolated final class WDSPTransmit: @unchecked Sendable {
     func meter(_ type: Int32) -> Double {
         guard isOpen else { return 0 }
         return GetTXAMeter(Self.channelID, type)
+    }
+
+    // MARK: - PureSignal (adaptive predistortion via calcc/iqc)
+
+    /// Drives calcc's control flags. Off = reset (drops the iqc correction);
+    /// Single Cal = mancal (one full calibration, then the correction stays applied).
+    func pureSignalControl(reset: Bool, mancal: Bool, automode: Bool, turnon: Bool) {
+        guard isOpen else { return }
+        SetPSControl(Self.channelID, reset ? 1 : 0, mancal ? 1 : 0,
+                     automode ? 1 : 0, turnon ? 1 : 0)
+    }
+
+    /// The rate of the feedback stream fed to `addPureSignalFeedback` — the RX
+    /// sample rate (192 kHz for classic Protocol 1 PS), not the 48 kHz TX rate.
+    func setPureSignalFeedbackRate(_ rate: Int) {
+        guard isOpen else { return }
+        SetPSFeedbackRate(Self.channelID, Int32(rate))
+    }
+
+    /// Tells calcc whether the transmitter is keyed (gates its delay lines and
+    /// state machine). Call on every key-down/key-up edge while PS is armed.
+    func setPureSignalMox(_ on: Bool) {
+        guard isOpen else { return }
+        SetPSMox(Self.channelID, on ? 1 : 0)
+        if !on { psFill = 0 }   // never splice feedback across transmissions
+    }
+
+    /// Feeds one EP6 packet's feedback: `tx` = the DAC loopback receiver,
+    /// `rx` = the RF sampler receiver (both interleaved Float I/Q at the RX rate).
+    /// Accumulates into 1024-sample blocks and hands each to WDSP's pscc.
+    func addPureSignalFeedback(tx: [Float], rx: [Float]) {
+        guard isOpen else { return }
+        let pairs = min(tx.count, rx.count) / 2
+        var index = 0
+        while index < pairs {
+            let take = min(pairs - index, Self.psBlockSize - psFill)
+            tx.withUnsafeBufferPointer { src in
+                psTxBuf.withUnsafeMutableBufferPointer { dst in
+                    vDSP_vspdp(src.baseAddress! + index * 2, 1,
+                               dst.baseAddress! + psFill * 2, 1, vDSP_Length(take * 2))
+                }
+            }
+            rx.withUnsafeBufferPointer { src in
+                psRxBuf.withUnsafeMutableBufferPointer { dst in
+                    vDSP_vspdp(src.baseAddress! + index * 2, 1,
+                               dst.baseAddress! + psFill * 2, 1, vDSP_Length(take * 2))
+                }
+            }
+            psFill += take
+            index += take
+            if psFill == Self.psBlockSize {
+                pscc(Self.channelID, Int32(Self.psBlockSize), &psTxBuf, &psRxBuf)
+                psFill = 0
+            }
+        }
+    }
+
+    /// calcc's 16-int status block; [15] is the calibration state machine's state.
+    func pureSignalInfo() -> [Int32] {
+        guard isOpen else { return [Int32](repeating: 0, count: 16) }
+        var info = [Int32](repeating: 0, count: 16)
+        GetPSInfo(Self.channelID, &info)
+        return info
     }
 }

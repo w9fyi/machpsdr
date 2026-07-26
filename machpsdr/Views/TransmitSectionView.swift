@@ -69,5 +69,29 @@ struct TransmitSectionView: View {
             Label("Transmitting", systemImage: "dot.radiowaves.left.and.right")
                 .foregroundStyle(.red)
         }
+
+        Divider()
+
+        Toggle("PureSignal", isOn: Binding(
+            get: { session.puresignal },
+            set: { session.setPureSignal($0) }
+        ))
+        .help("Adaptive predistortion: uses the radio's TX feedback receivers to linearize the transmitted signal. Needs 192 kHz and \(session.psRequiredSlices) active slices.")
+        if session.puresignal {
+            HStack {
+                Button("Single Cal") { session.pureSignalSingleCal() }
+                    .disabled(!session.isTransmitting)
+                    .help("Run one calibration while transmitting voice or two-tone. Single Cal (not continuous) avoids the 10E's feedback-crosstalk artifact.")
+                Spacer()
+                Text("Cal: \(RadioSession.psStateName(session.lastUpdate?.psState ?? -1))")
+                    .monospacedDigit()
+                    .foregroundStyle((session.lastUpdate?.psState ?? -1) == 8 ? .green : .secondary)
+            }
+        }
+        if !session.psStatusMessage.isEmpty {
+            Text(session.psStatusMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 }
