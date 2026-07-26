@@ -2,7 +2,7 @@
 
 This file is part of a program that implements a Software-Defined Radio.
 
-Copyright (C) 2015 Warren Pratt, NR0V
+Copyright (C) 2015, 2025 Warren Pratt, NR0V
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
@@ -25,11 +25,10 @@ warren@wpratt.com
 */
 #define _CRT_SECURE_NO_WARNINGS
 #include "comm.h"
-
-#if defined(linux) || defined(__APPLE__)
 #include "calculus.h"
-#endif
-	
+#include "zetaHat.h"
+#include "FDnoiseIQ.h"
+
 /********************************************************************************************************
 *																										*
 *											Special Functions											*
@@ -195,15 +194,108 @@ void interpM (double* res, double x, int nvals, double* xvals, double* yvals)
 		*res = yvals[nvals - 1];
 	else
 	{
-		int idx = 0;
+		int idx = 1;
 		double xllow, xlhigh, frac;
-		while (x >= xvals[idx])  idx++;
-		xllow = log10 (xvals[idx - 1]);
-		xlhigh = log10(xvals[idx]);
+		while (x > xvals[idx])  idx++;
+		xllow  = log10 (xvals[idx - 1]);
+		xlhigh = log10 (xvals[idx]);
 		frac = (log10 (x) - xllow) / (xlhigh - xllow);
 		*res = yvals[idx - 1] + frac * (yvals[idx] - yvals[idx - 1]);
 	}
 }
+
+int readZetaHat(const char* zeta_file, int* rows, int* cols,
+	double* gmin, double* gmax, double* ximin, double* ximax, double* zetaHat, int* zetaValid)
+{
+	char zetaBinary[256];
+	char bin[50] = ".bin";
+	sprintf (zetaBinary, "%s%s", zeta_file, bin);
+	FILE* pzetaBinary;
+	int e = 0;
+	if (pzetaBinary = fopen(zetaBinary, "rb"))
+	{
+		int nvals = 0;
+		// 'fread's executed only through first error
+		if (e == 0 && fread(rows,      sizeof(int),    1,     pzetaBinary) != 1) e = 1;
+		if (e == 0 && fread(cols,      sizeof(int),    1,     pzetaBinary) != 1) e = 1;
+		if (e == 0 && fread(gmin,      sizeof(double), 1,     pzetaBinary) != 1) e = 1;
+		if (e == 0 && fread(gmax,      sizeof(double), 1,     pzetaBinary) != 1) e = 1;
+		if (e == 0 && fread(ximin,     sizeof(double), 1,     pzetaBinary) != 1) e = 1;
+		if (e == 0 && fread(ximax,     sizeof(double), 1,     pzetaBinary) != 1) e = 1;
+		if (e == 0)   nvals = (*rows) * (*cols);
+		if (e == 0 && fread(zetaHat,   sizeof(double), nvals, pzetaBinary) != nvals) e = 1;
+		if (e == 0 && fread(zetaValid, sizeof(int),    nvals, pzetaBinary) != nvals) e = 1;
+		fclose(pzetaBinary);
+	}
+	else 
+		e = 1;
+	if (e)
+	{
+		*rows  = CzetaRows;
+		*cols  = CzetaCols;
+		*gmin  = CzetaGmin;
+		*gmax  = CzetaGmax;
+		*ximin = CzetaXimin;
+		*ximax = CzetaXimax;
+		int nvals = (*rows) * (*cols);
+		memcpy (zetaHat,   CzetaHat,   nvals * sizeof (double));
+		memcpy (zetaValid, CzetaValid, nvals * sizeof (int));
+	}
+	return 0;
+}
+
+void CwriteZetaHat(const char* cfile, int zetaHat_rows, int zetaHat_cols,
+	double zetaHat_gmin, double zetaHat_gmax, double zetaHat_ximin, double zetaHat_ximax, double* zetaHat, int* zetaValid)
+{
+	int n, i, j;
+	char cfilename[256];
+	char dot_c[50] = ".c";
+	sprintf(cfilename, "%s%s", cfile, dot_c);
+	FILE* pcfile;
+	if (pcfile = fopen(cfilename, "w"))
+	{
+		fprintf(pcfile, "int CzetaRows = %d;\n",        zetaHat_rows);
+		fprintf(pcfile, "int CzetaCols = %d;\n",        zetaHat_cols);
+		fprintf(pcfile, "double CzetaGmin = %lf;\n",    zetaHat_gmin);
+		fprintf(pcfile, "double CzetaGmax = %lf;\n",    zetaHat_gmax);
+		fprintf(pcfile, "double CzetaXimin = %lf;\n",   zetaHat_ximin);
+		fprintf(pcfile, "double CzetaXimax = %lf;\n\n", zetaHat_ximax);
+		n = zetaHat_rows * zetaHat_cols;
+		fprintf(pcfile, "double CzetaHat [%d] =\n", n);
+		fprintf(pcfile, "{\n");
+		i = 0;
+		j = 0;
+		while (i < n)
+		{
+			fprintf(pcfile, "%.17e,  ", zetaHat[i++]);
+			if (++j == 4)
+			{
+				fprintf(pcfile, "\n");
+				j = 0;
+			}
+		}
+		if (j != 0) fprintf(pcfile, "\n");
+		fprintf(pcfile, "};\n\n");
+		fprintf(pcfile, "int CzetaValid [%d] =\n", n);
+		fprintf(pcfile, "{\n");
+		i = 0;
+		j = 0;
+		while (i < n)
+		{
+			fprintf(pcfile, "%d,  ", zetaValid[i++]);
+			if (++j == 4)
+			{
+				fprintf(pcfile, "\n");
+				j = 0;
+			}
+		}
+		if (j != 0) fprintf(pcfile, "\n");
+		fprintf(pcfile, "};\n");
+		fflush(pcfile);
+		fclose(pcfile);
+	}
+}
+void post2_calc_w(EMNR a);
 
 void calc_emnr(EMNR a)
 {
@@ -252,22 +344,24 @@ void calc_emnr(EMNR a)
 	a->Rfor = fftw_plan_dft_r2c_1d(a->fsize, a->forfftin, (fftw_complex *)a->forfftout, FFTW_ESTIMATE);
 	a->Rrev = fftw_plan_dft_c2r_1d(a->fsize, (fftw_complex *)a->revfftin, a->revfftout, FFTW_ESTIMATE);
 	calc_window(a);
-
+	//
+	// g
 	a->g.msize = a->msize;
 	a->g.mask = a->mask;
 	a->g.y = a->forfftout;
-	a->g.lambda_y = (double *)malloc0(a->msize * sizeof(double));
-	a->g.lambda_d = (double *)malloc0(a->msize * sizeof(double));
-	a->g.prev_gamma = (double *)malloc0(a->msize * sizeof(double));
-	a->g.prev_mask = (double *)malloc0(a->msize * sizeof(double));
+	a->g.lambda_y    = (double*)malloc0(a->msize * sizeof(double));
+	a->g.lambda_d    = (double*)malloc0(a->msize * sizeof(double));
+	a->g.prev_gamma  = (double*)malloc0(a->msize * sizeof(double));
+	a->g.prev_mask   = (double*)malloc0(a->msize * sizeof(double));
 
 	a->g.gf1p5 = sqrt(PI) / 2.0;
 	{
-		double tau = -128.0 / 8000.0 / log(0.98);
+		double tau = -128.0 / 8000.0 / log(0.985);
 		a->g.alpha = exp(-a->incr / a->rate / tau);
 	}
 	a->g.eps_floor = 1.0e-300;
-	a->g.gamma_max = 1000.0;
+	a->g.gamma_max = 40.0;
+	a->g.xi_min = pow(10.0, -40.0 / 10.0);
 	a->g.q = 0.2;
 	for (i = 0; i < a->g.msize; i++)
 	{
@@ -278,18 +372,26 @@ void calc_emnr(EMNR a)
 	//
 	a->g.GG = (double *)malloc0(241 * 241 * sizeof(double));
 	a->g.GGS = (double *)malloc0(241 * 241 * sizeof(double));
-#if defined(linux) || defined(__APPLE__)
-        memcpy(a->g.GG, GG, 241 * 241 * sizeof(double));
-        memcpy(a->g.GGS, GGS, 241 * 241 * sizeof(double));
-#else
-
-	a->g.fileb = fopen("calculus", "rb");
-	fread(a->g.GG, sizeof(double), 241 * 241, a->g.fileb);
-	fread(a->g.GGS, sizeof(double), 241 * 241, a->g.fileb);
-	fclose(a->g.fileb);
-#endif
+	if (a->g.fileb = fopen("calculus", "rb"))
+	{
+		fread(a->g.GG, sizeof(double), 241 * 241, a->g.fileb);
+		fread(a->g.GGS, sizeof(double), 241 * 241, a->g.fileb);
+		fclose(a->g.fileb);
+	}
+	else
+	{
+		memcpy (a->g.GG,  GG,  241 * 241 * sizeof(double));
+		memcpy (a->g.GGS, GGS, 241 * 241 * sizeof(double));
+	}
 	//
-
+	a->g.dim_zeta = 60;
+	a->g.zeta_hat = (double*)malloc0(a->g.dim_zeta * a->g.dim_zeta * sizeof(double));
+	a->g.zeta_true = (int*)  malloc0(a->g.dim_zeta * a->g.dim_zeta * sizeof(int));
+	a->g.zeta_thresh = -2.0;
+	int rows, cols;
+	readZetaHat("zetaHat", &rows, &cols, &a->g.z_gamma_min, &a->g.z_gamma_max, &a->g.z_xihat_min, &a->g.z_xihat_max, a->g.zeta_hat, a->g.zeta_true);
+	// CwriteZetaHat("zetaHat", rows, cols, a->g.z_gamma_min, a->g.z_gamma_max, a->g.z_xihat_min, a->g.z_xihat_max, a->g.zeta_hat, a->g.zeta_true);
+	// np
 	a->np.incr = a->incr;
 	a->np.rate = a->rate;
 	a->np.msize = a->msize;
@@ -381,7 +483,8 @@ void calc_emnr(EMNR a)
 		}
 		memset(a->np.lmin_flag, 0, a->np.msize * sizeof(int));
 	}
-
+	//
+	// nps
 	a->nps.incr = a->incr;
 	a->nps.rate = a->rate;
 	a->nps.msize = a->msize;
@@ -409,26 +512,86 @@ void calc_emnr(EMNR a)
 		a->nps.sigma2N[i] = 0.5;
 		a->nps.Pbar[i] = 0.5;
 	}
-
+	//
+	// npl
+	a->npl.rate = a->rate;
+	a->npl.msize = a->msize;
+	a->npl.incr = a->incr;
+	a->npl.Ysq = a->g.lambda_y;
+	a->npl.P    = (double*)malloc0 (a->npl.msize * sizeof(double));
+	a->npl.Pmin = (double*)malloc0 (a->npl.msize * sizeof(double));
+	a->npl.p    = (double*)malloc0 (a->npl.msize * sizeof(double));
+	a->npl.D    = (double*)malloc0 (a->npl.msize * sizeof(double));
+	a->npl.lambda_d = a->g.lambda_d;
+	{
+		double tau = -256.0 / (20100.0 * log(0.7));
+		a->npl.eta = exp(-a->npl.incr / (a->npl.rate * tau));
+	}
+	{
+		double tau = -256.0 / (20100.0 * log(0.998));
+		a->npl.gamma = exp(-a->npl.incr / (a->npl.rate * tau));
+	}
+	{
+		double tau = -256.0 / (20100.0 * log(0.8));
+		a->npl.beta = exp(-a->npl.incr / (a->npl.rate * tau));
+	}
+	{
+		double tau = -256.0 / (20100.0 * log(0.85));
+		a->npl.alpha_d = exp(-a->npl.incr / (a->npl.rate * tau));
+	}
+	{
+		double tau = -256.0 / (20100.0 * log(0.2));
+		a->npl.alpha_p = exp(-a->npl.incr / (a->npl.rate * tau));
+	}
+	a->npl.delta_LF = 1000.0 / (a->npl.rate / 2) * a->npl.msize;
+	a->npl.delta_MF = 3000.0 / (a->npl.rate / 2) * a->npl.msize;
+	a->npl.delta_0 = 2.0;
+	a->npl.delta_1 = 2.0;
+	a->npl.delta_2 = 5.0;
+	//
+	// ae
 	a->ae.msize = a->msize;
 	a->ae.lambda_y = a->g.lambda_y;
 
 	a->ae.zetaThresh = 0.75;
-	a->ae.psi = 10.0;
-
+	a->ae.psi        = 20.0;
+	a->ae.t2 = 0.20;
 	a->ae.nmask = (double *)malloc0(a->ae.msize * sizeof(double));
+	//
+	// post2
+	a->post2.run = 0;
+	a->post2.factor = 0.15;
+	a->post2.nlevel = 0.15;
+	a->post2.tc_decay = 5.0;
+	a->post2.rate_decay = exp(-a->fsize / (a->post2.tc_decay * a->rate * a->ovrlp));
+	a->post2.taper = 0.12;
+	a->post2.w = (double*)malloc0(a->msize * sizeof(double));
+	a->post2.noise_frames = FDnoise_frames;
+	a->post2.noise_frame_index = 0;
+	a->post2.noise_frame = (double*)malloc0(2 * a->msize * sizeof(double));
+	a->post2.olddmag = 0.0;
+	post2_calc_w(a);
 }
 
 void decalc_emnr(EMNR a)
 {
 	int i;
+	// post2
+	_aligned_free(a->post2.noise_frame);
+	_aligned_free(a->post2.w);
+	// ae
 	_aligned_free(a->ae.nmask);
-
+	// npl
+	_aligned_free(a->npl.D);
+	_aligned_free(a->npl.p);
+	_aligned_free(a->npl.Pmin);
+	_aligned_free(a->npl.P);
+	// nps
 	_aligned_free(a->nps.EN2y);
 	_aligned_free(a->nps.Pbar);
 	_aligned_free(a->nps.PH1y);
 	_aligned_free(a->nps.sigma2N);
-
+	// np
 	for (i = 0; i < a->np.U; i++)
 		_aligned_free(a->np.actminbuff[i]);
 	_aligned_free(a->np.actminbuff);
@@ -446,14 +609,16 @@ void decalc_emnr(EMNR a)
 	_aligned_free(a->np.alphaHat);
 	_aligned_free(a->np.alphaOptHat);
 	_aligned_free(a->np.p);
-
+	// g
+	_aligned_free(a->g.zeta_true);
+	_aligned_free(a->g.zeta_hat);
 	_aligned_free(a->g.GGS);
 	_aligned_free(a->g.GG);
 	_aligned_free(a->g.prev_mask);
 	_aligned_free(a->g.prev_gamma);
 	_aligned_free(a->g.lambda_d);
 	_aligned_free(a->g.lambda_y);
-
+	//
 	fftw_destroy_plan(a->Rrev);
 	fftw_destroy_plan(a->Rfor);
 	_aligned_free(a->outaccum);
@@ -652,6 +817,35 @@ void LambdaDs (EMNR a)
 	memcpy (a->nps.lambda_d, a->nps.sigma2N, a->nps.msize * sizeof (double));
 }
 
+void LambdaDl (EMNR a)
+{
+	double P_old, c, Sr, delta, I, alpha_s;
+	c = (1.0 - a->npl.gamma) / (1.0 - a->npl.beta);
+	for (int k = 0; k < a->npl.msize; k++)
+	{
+		P_old = a->npl.P[k];
+		a->npl.P[k] = a->npl.eta * P_old + (1.0 - a->npl.eta) * a->npl.Ysq[k];
+		if (a->npl.Pmin[k] < a->npl.P[k])
+			a->npl.Pmin[k] = a->npl.gamma * a->npl.Pmin[k] + c * (a->npl.P[k] - a->npl.beta * P_old);
+		else
+			a->npl.Pmin[k] = a->npl.P[k];
+		Sr = a->npl.P[k] / a->npl.Pmin[k];
+		if      (k <= a->npl.delta_LF) delta = a->npl.delta_0;
+		else if (k <= a->npl.delta_MF) delta = a->npl.delta_1;
+		else                           delta = a->npl.delta_2;
+		if (Sr > delta) I = 1.0;
+		else            I = 0.0;
+		a->npl.p[k] = a->npl.alpha_p * a->npl.p[k] + (1.0 - a->npl.alpha_p) * I;
+		alpha_s = a->npl.alpha_d + (1.0 - a->npl.alpha_d) * a->npl.p[k];
+		a->npl.D[k] = alpha_s * a->npl.D[k] + (1.0 - alpha_s) * a->npl.Ysq[k];
+	}
+	memcpy (a->npl.lambda_d, a->npl.D, a->npl.msize * sizeof(double));
+}
+
+/********************************************************************************************************
+*										Begin Post-Processing Functions									*
+********************************************************************************************************/
+
 void aepf(EMNR a)
 {
 	int k, m;
@@ -670,10 +864,17 @@ void aepf(EMNR a)
 	else
 		zetaT = zeta;
 	if (zetaT == 1.0)
-		N = 1;
+		N = 1;				
 	else
 		N = 1 + 2 * (int)(0.5 + a->ae.psi * (1.0 - zetaT / a->ae.zetaThresh));
 	n = N / 2;
+	for (k = 0; k < n; k++)
+	{
+		a->ae.nmask[k] = 0.0;
+		for (m = 0; m <= 2 * k; m++)
+			a->ae.nmask[k] += a->mask[m];
+		a->ae.nmask[k] /= (double)(2 * k + 1);
+	}
 	for (k = n; k < (a->ae.msize - n); k++)
 	{
 		a->ae.nmask[k] = 0.0;
@@ -681,8 +882,121 @@ void aepf(EMNR a)
 			a->ae.nmask[k] += a->mask[m];
 		a->ae.nmask[k] /= (double)N;
 	}
-	memcpy (a->mask + n, a->ae.nmask, (a->ae.msize - 2 * n) * sizeof (double));
+	for (k = a->ae.msize - n; k < a->ae.msize; k++)
+	{
+		a->ae.nmask[k] = 0.0;
+		for (m = (a->ae.msize - 1); m >= (-a->ae.msize + 2 * k + 1); m--)
+			a->ae.nmask[k] += a->mask[m];
+		a->ae.nmask[k] /= (double)(2 * (a->ae.msize - k) - 1);
+	}
+	memcpy (a->mask, a->ae.nmask, a->ae.msize * sizeof (double));
+	if (a->g.gain_method == 3 && zetaT < a->ae.t2)
+		for (k = 0; k < a->ae.msize; k++)
+			a->mask[k] *= 0.05;
 }
+
+void post2_calc_w(EMNR a)
+{
+	int i;
+	int ilim = (int)(a->post2.taper * a->msize);
+	memset(a->post2.w, a->msize, sizeof(double));
+	for (i = 0; i < ilim; i++)
+	{
+		a->post2.w[i] = 0.75 - 0.25 * cos(PI * (ilim - 1 - i) / (ilim - 1));
+	}
+}
+
+void post2(EMNR a)
+{
+	if (a->post2.run)
+	{
+		int i;
+		double Iwhite, Qwhite, Irem, Qrem, Inoise, Qnoise;
+		double factor = a->post2.factor;
+		double nlevel = a->post2.nlevel;
+		double rate_decay = a->post2.rate_decay;
+		double* w = a->post2.w;
+		int ilim = (int)(a->post2.taper * a->msize);
+		double tdmag = 0.0, dmag = 0.0, dmult = 0.0;
+		for (i = 1; i < ilim; i++)
+		{
+			tdmag = a->gain * sqrt(a->forfftout[2 * i + 0] * a->forfftout[2 * i + 0] +
+				a->forfftout[2 * i + 1] * a->forfftout[2 * i + 1]);
+			if (tdmag > dmag) dmag = tdmag;
+		}
+		if (dmag > a->post2.olddmag) a->post2.olddmag = dmag;
+		else a->post2.olddmag *= rate_decay;
+		dmag = fmax(dmag, a->post2.olddmag);
+		dmult = dmag * 4.0 * a->gain;
+		memcpy(a->post2.noise_frame, FDnoise + 2 * a->msize * a->post2.noise_frame_index, 
+			2 * ilim * sizeof(double));
+		a->post2.noise_frame_index = (a->post2.noise_frame_index + 1) % a->post2.noise_frames;
+		for (i = 1; i < ilim; i++)
+		{
+			Irem = a->gain * a->forfftout[2 * i + 0] - a->revfftin[2 * i + 0];
+			Qrem = a->gain * a->forfftout[2 * i + 1] - a->revfftin[2 * i + 1];
+			Iwhite = dmult * a->post2.noise_frame[2 * i + 0];
+			Qwhite = dmult * a->post2.noise_frame[2 * i + 1];
+			Inoise = (1.0 - factor) * Irem + factor * Iwhite;
+			Qnoise = (1.0 - factor) * Qrem + factor * Qwhite;
+			a->revfftin[2 * i + 0] = w[i] * (a->revfftin[2 * i + 0] + nlevel * Inoise);
+			a->revfftin[2 * i + 1] = w[i] * (a->revfftin[2 * i + 1] + nlevel * Qnoise);
+		}
+		a->revfftin[0] = 0.0;
+		a->revfftin[1] = 0.0;
+		memset(a->revfftin + 2 * ilim, 0, 2 * (a->msize - ilim) * sizeof(double));
+	}
+}
+
+PORT
+void SetRXAEMNRpost2Run(int channel, int run)
+{
+	EnterCriticalSection(&ch[channel].csDSP);
+	rxa[channel].emnr.p->post2.run = run;
+	LeaveCriticalSection(&ch[channel].csDSP);
+}
+
+PORT
+void SetRXAEMNRpost2Factor(int channel, double factor)
+{
+	EnterCriticalSection(&ch[channel].csDSP);
+	rxa[channel].emnr.p->post2.factor = factor / 100.0;
+	LeaveCriticalSection(&ch[channel].csDSP);
+}
+
+PORT
+void SetRXAEMNRpost2Nlevel(int channel, double nlevel)
+{
+	EnterCriticalSection(&ch[channel].csDSP);
+	rxa[channel].emnr.p->post2.nlevel = nlevel / 100.0;
+	LeaveCriticalSection(&ch[channel].csDSP);
+}
+
+PORT
+void SetRXAEMNRpost2Taper(int channel, int taper)
+{
+	EMNR a = rxa[channel].emnr.p;
+	EnterCriticalSection(&ch[channel].csDSP);
+	a->post2.taper = (double)taper / 100.0;
+	post2_calc_w(a);
+	LeaveCriticalSection(&ch[channel].csDSP);
+}
+
+PORT
+void SetRXAEMNRpost2Rate(int channel, double tc)
+{
+	EMNR a = rxa[channel].emnr.p;
+	EnterCriticalSection(&ch[channel].csDSP);
+	if (tc < 0.2) tc = 0.2;
+	a->post2.tc_decay = tc;
+	a->post2.rate_decay = exp(-a->fsize / (a->post2.tc_decay * a->rate * a->ovrlp));
+	a->post2.olddmag = 0.0;
+	LeaveCriticalSection(&ch[channel].csDSP);
+}
+
+/********************************************************************************************************
+*										End Post-Processing Functions									*
+********************************************************************************************************/
 
 double getKey(double* type, double gamma, double xi)
 {
@@ -730,6 +1044,28 @@ double getKey(double* type, double gamma, double xi)
 		+         dg   *        dx  * type[241 * nxi2 + ngamma2];
 }
 
+int getZeta( EMNR a, double gamma, double eps, double* zeta)
+{
+	int index, i_gamma, i_xi;
+	double gamma_dB, xi_dB, gamma_per_cell, xi_per_cell;
+	gamma_dB = 10.0 * mlog10(gamma);
+	xi_dB    = 10.0 * mlog10(eps);
+	gamma_per_cell = (a->g.z_gamma_max - a->g.z_gamma_min) / a->g.dim_zeta;
+	xi_per_cell    = (a->g.z_xihat_max - a->g.z_xihat_min) / a->g.dim_zeta;
+	i_gamma = (int)floor((gamma_dB - a->g.z_gamma_min) / gamma_per_cell);
+	i_xi    = (int)floor((xi_dB    - a->g.z_xihat_min) / xi_per_cell);
+	if (i_gamma < 0 || i_gamma >= a->g.dim_zeta ||
+		i_xi < 0 || xi_dB  >= a->g.dim_zeta)
+		return -1;
+	index = i_gamma * a->g.dim_zeta + i_xi;
+	int ztvalue = a->g.zeta_true[index];
+	if (ztvalue <= 0) 
+		return -2;
+	else 
+		*zeta = a->g.zeta_hat[index];
+	return 0;
+}
+
 void calc_gain (EMNR a)
 {
 	int k;
@@ -745,17 +1081,21 @@ void calc_gain (EMNR a)
 	case 1:
 		LambdaDs(a);
 		break;
+	case 2:
+		LambdaDl(a);
+		break;
 	}
 	switch (a->g.gain_method)
 	{
 	case 0:
 		{
 			double gamma, eps_hat, v;
-			for (k = 0; k < a->msize; k++)
+			for (k = 0; k < a->g.msize; k++)
 			{
 				gamma = min (a->g.lambda_y[k] / a->g.lambda_d[k], a->g.gamma_max);
 				eps_hat = a->g.alpha * a->g.prev_mask[k] * a->g.prev_mask[k] * a->g.prev_gamma[k]
 					+ (1.0 - a->g.alpha) * max (gamma - 1.0, a->g.eps_floor);
+				eps_hat = max(eps_hat, a->g.xi_min);
 				v = (eps_hat / (1.0 + eps_hat)) * gamma;
 				a->g.mask[k] = a->g.gf1p5 * sqrt (v) / gamma * exp (- 0.5 * v)
 					* ((1.0 + v) * bessI0 (0.5 * v) + v * bessI1 (0.5 * v));
@@ -793,7 +1133,7 @@ void calc_gain (EMNR a)
 	case 2:
 		{
 			double gamma, eps_hat, eps_p;
-			for (k = 0; k < a->msize; k++)
+			for (k = 0; k < a->g.msize; k++)
 			{
 				gamma = min(a->g.lambda_y[k] / a->g.lambda_d[k], a->g.gamma_max);
 				eps_hat = a->g.alpha * a->g.prev_mask[k] * a->g.prev_mask[k] * a->g.prev_gamma[k]
@@ -802,6 +1142,54 @@ void calc_gain (EMNR a)
 				a->g.mask[k] = getKey(a->g.GG, gamma, eps_hat) * getKey(a->g.GGS, gamma, eps_p);
 				a->g.prev_gamma[k] = gamma;
 				a->g.prev_mask[k] = a->g.mask[k];
+			}
+			break;
+		}
+	case 3:
+		{
+			double gamma, xi_hat, v, zeta_hat;
+			for (k = 0; k < a->g.msize; k++)
+			{
+				gamma = min(a->g.lambda_y[k] / a->g.lambda_d[k], a->g.gamma_max);
+				xi_hat = a->g.alpha * a->g.prev_mask[k] * a->g.prev_mask[k] * a->g.prev_gamma[k]
+					+ (1.0 - a->g.alpha) * max(gamma - 1.0, a->g.eps_floor);
+				xi_hat = max(xi_hat, a->g.xi_min);
+				v = (xi_hat / (1.0 + xi_hat)) * gamma;
+				a->g.mask[k] = a->g.gf1p5 * sqrt(v) / gamma * exp(-0.5 * v)
+					* ((1.0 + v) * bessI0(0.5 * v) + v * bessI1(0.5 * v));
+				{
+					double v2 = min(v, 700.0);
+					double eta = a->g.mask[k] * a->g.mask[k] * a->g.lambda_y[k] / a->g.lambda_d[k];
+					double eps = eta / (1.0 - a->g.q);
+					double witchHat = (1.0 - a->g.q) / a->g.q * exp(v2) / (1.0 + eps);
+					a->g.mask[k] *= witchHat / (1.0 + witchHat);
+				}
+				if (a->g.mask[k] > a->g.gmax) a->g.mask[k] = a->g.gmax;
+				if (a->g.mask[k] != a->g.mask[k]) a->g.mask[k] = 0.01;
+				a->g.prev_mask[k] = a->g.mask[k];
+				a->g.prev_gamma[k] = gamma;
+
+				{
+					double xi_ts = a->g.mask[k] * a->g.mask[k] * gamma;
+					xi_ts = max(xi_ts, a->g.xi_min);
+					double v_ts = (xi_ts / (1.0 + xi_ts)) * gamma;
+					a->g.mask[k] = a->g.gf1p5 * sqrt(v_ts) / gamma * exp(-0.5 * v_ts)
+						* ((1.0 + v_ts) * bessI0(0.5 * v_ts) + v_ts * bessI1(0.5 * v_ts));
+					double v2 = min(v_ts, 700.0);
+					double eta = a->g.mask[k] * a->g.mask[k] * a->g.lambda_y[k] / a->g.lambda_d[k];
+					double eps = eta / (1.0 - a->g.q);
+					double witchHat = (1.0 - a->g.q) / a->g.q * exp(v2) / (1.0 + eps);
+					a->g.mask[k] *= witchHat / (1.0 + witchHat);
+					xi_hat = xi_ts;
+				}
+				if (a->g.mask[k] > a->g.gmax) a->g.mask[k] = a->g.gmax;
+				if (a->g.mask[k] != a->g.mask[k]) a->g.mask[k] = 0.01;
+
+				if (getZeta(a, gamma, xi_hat, &zeta_hat) >= 0)
+				{
+					if (zeta_hat > a->g.zeta_thresh) a->g.mask[k] = 1.0;
+					else                             a->g.mask[k] = 0.0;
+				}
 			}
 			break;
 		}
@@ -835,6 +1223,7 @@ void xemnr (EMNR a, int pos)
 				a->revfftin[2 * i + 0] = g1 * a->forfftout[2 * i + 0];
 				a->revfftin[2 * i + 1] = g1 * a->forfftout[2 * i + 1];
 			}
+			post2(a);
 			fftw_execute (a->Rrev);
 			for (i = 0; i < a->fsize; i++)
 				a->save[a->saveidx][i] = a->window[i] * a->revfftout[i];
@@ -896,7 +1285,7 @@ void SetRXAEMNRRun (int channel, int run)
 	EMNR a = rxa[channel].emnr.p;
 	if (a->run != run)
 	{
-		RXAbp1Check (channel, rxa[channel].amd.p->run, rxa[channel].snba.p->run,
+		RXAbp1Check (channel, rxa[channel].amd.p->run, rxa[channel].snba.p->run, 
 			run, rxa[channel].anf.p->run, rxa[channel].anr.p->run, rxa[channel].rnnr.p->run);
 		EnterCriticalSection (&ch[channel].csDSP);
 		a->run = run;
@@ -932,9 +1321,12 @@ void SetRXAEMNRaeRun (int channel, int run)
 PORT
 void SetRXAEMNRPosition (int channel, int position)
 {
+	EMNR a = rxa[channel].emnr.p;
 	EnterCriticalSection (&ch[channel].csDSP);
-	rxa[channel].emnr.p->position = position;
+	a->position = position;
 	rxa[channel].bp1.p->position  = position;
+	flush_emnr(a);
+	a->post2.olddmag = 0.0;
 	LeaveCriticalSection (&ch[channel].csDSP);
 }
 
@@ -952,4 +1344,20 @@ void SetRXAEMNRaePsi (int channel, double psi)
 	EnterCriticalSection (&ch[channel].csDSP);
 	rxa[channel].emnr.p->ae.psi = psi;
 	LeaveCriticalSection (&ch[channel].csDSP);
+}
+
+PORT
+void SetRXAEMNRtrainZetaThresh(int channel, double thresh)
+{
+	EnterCriticalSection(&ch[channel].csDSP);
+	rxa[channel].emnr.p->g.zeta_thresh = thresh;
+	LeaveCriticalSection(&ch[channel].csDSP);
+}
+
+PORT
+void SetRXAEMNRtrainT2(int channel, double t2)
+{
+	EnterCriticalSection(&ch[channel].csDSP);
+	rxa[channel].emnr.p->ae.t2 = t2;
+	LeaveCriticalSection(&ch[channel].csDSP);
 }

@@ -2,7 +2,7 @@
 
 This file is part of a program that implements a Software-Defined Radio.
 
-Copyright (C) 2013 Warren Pratt, NR0V
+Copyright (C) 2013, 2024, 2025, 2026 Warren Pratt, NR0V
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
@@ -26,27 +26,24 @@ warren@wpratt.com
 
 #if defined(linux) || defined(__APPLE__)
 #include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <stdint.h>
+#include <time.h>
+#include <assert.h>
 #include <pthread.h>
 #include <semaphore.h>
-#include <string.h>
 #include "linux_port.h"
-#ifdef ANDROID
-#include <android/log.h>
-#define APPNAME "WDSP"
-#define LOGD(LOG_TAG, ...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
-#define LOGI(LOG_TAG, ...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG,__VA_ARGS__)
-#define LOGV(LOG_TAG, ...) __android_log_print(ANDROID_LOG_VERBOSE, LOG_TAG, __VA_ARGS__)
-#define LOGW(LOG_TAG, ...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
-#define LOGE(LOG_TAG, ...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-#endif
 #else
 #include <Windows.h>
 #include <process.h>
 #include <intrin.h>
-#include <avrt.h>
-#endif
 #include <math.h>
+#include <stdint.h>
 #include <time.h>
+#include <avrt.h>
+#include <assert.h>
+#endif
 #include "fftw3.h"
 
 #include "amd.h"
@@ -55,16 +52,19 @@ warren@wpratt.com
 #include "analyzer.h"
 #include "anf.h"
 #include "anr.h"
+#include "apfshadow.h"
 #include "bandpass.h"
 #include "calcc.h"
 #include "cblock.h"
 #include "cfcomp.h"
 #include "cfir.h"
 #include "channel.h"
+#include "cmath.h"
 #include "compress.h"
 #include "delay.h"
 #include "dexp.h"
 #include "div.h"
+#include "doublepole.h"
 #include "eer.h"
 #include "emnr.h"
 #include "emph.h"
@@ -76,21 +76,27 @@ warren@wpratt.com
 #include "fmmod.h"
 #include "fmsq.h"
 #include "gain.h"
+#include "gaussian.h"
 #include "gen.h"
 #include "icfir.h"
 #include "iir.h"
+#include "impulse_cache.h"
 #include "iobuffs.h"
 #include "iqc.h"
 #include "lmath.h"
 #include "main.h"
+#include "matchedCW.h"
 #include "meter.h"
 #include "meterlog10.h"
 #include "nbp.h"
 #include "nob.h"
 #include "nobII.h"
+#include "nurbs.h"
 #include "osctrl.h"
 #include "patchpanel.h"
+#include "phrot.h"
 #include "resample.h"
+#include "reshb.h"
 #include "rmatch.h"
 #include "rnnr.h"
 #include "RXA.h"
@@ -99,10 +105,12 @@ warren@wpratt.com
 #include "siphon.h"
 #include "slew.h"
 #include "snb.h"
+#include "ssql.h"
 #include "syncbuffs.h"
 #include "TXA.h"
 #include "utilities.h"
 #include "varsamp.h"
+#include "wbfm.h"
 #include "wcpAGC.h"
 
 // manage differences among consoles
@@ -115,7 +123,7 @@ warren@wpratt.com
 #define OUTREAL							float				// data type for channel output buffer
 
 // display definitions
-#define dMAX_DISPLAYS					64					// maximum number of displays = max instances
+#define dMAX_DISPLAYS					72					// maximum number of displays = max instances
 #define dMAX_STITCH						4					// maximum number of sub-spans to stitch together
 #define dMAX_NUM_FFT					1					// maximum number of ffts for an elimination
 #define dMAX_PIXELS						16384				// maximum number of pixels that can be requested
@@ -134,8 +142,7 @@ warren@wpratt.com
 #define dMAX_PIXOUTS					4					// maximum number of det/avg/outputs per display instance
 
 // wisdom definitions
-#define MAX_WISDOM_SIZE_DISPLAY			262144
-#define MAX_WISDOM_SIZE_FILTER			262144				// was 32769
+#define MAX_WISDOM_SIZE                 262144
 
 // math definitions
 #define PI								3.1415926535897932
@@ -144,3 +151,7 @@ warren@wpratt.com
 // miscellaneous
 typedef double complex[2];
 #define PORT							__declspec( dllexport )
+#ifndef M_PI
+#  define M_PI 3.14159265358979323846
+#endif
+

@@ -28,7 +28,8 @@ warren@wpratt.com
 
 void calc_varsamp (VARSAMP a)
 {
-	double min_rate, max_rate, norm_rate;
+	double min_rate, norm_rate;
+	// double max_rate;
 	double fc_norm_high, fc_norm_low;
 	a->nom_ratio = (double)a->out_rate / (double)a->in_rate;
 	a->cvar = a->var * a->nom_ratio;
@@ -40,14 +41,15 @@ void calc_varsamp (VARSAMP a)
 	if (a->out_rate >= a->in_rate)
 	{
 		min_rate = (double)a->in_rate;
-		max_rate = (double)a->out_rate;
+		// max_rate = (double)a->out_rate;
 		norm_rate = min_rate;
 	}
 	else
 	{
 		min_rate = (double)a->out_rate;
-		max_rate = (double)a->in_rate;
-		norm_rate = max_rate;
+		// max_rate = (double)a->in_rate;
+		// norm_rate = max_rate;
+		norm_rate = (double)a->in_rate;
 	}
 	if (a->fc == 0.0) a->fc = 0.95 * 0.45 * min_rate;
 	fc_norm_high = a->fc / norm_rate;
@@ -124,8 +126,8 @@ void hshift (VARSAMP a)
 int xvarsamp (VARSAMP a, double var)
 {
 	int outsamps = 0;
-	unsigned _int64* picvar;
-	unsigned _int64 N;
+	uint64_t* picvar;
+	uint64_t N;
 	a->var = var;
 	a->old_inv_cvar = a->inv_cvar;
 	a->cvar = a->var * a->nom_ratio;
@@ -146,7 +148,7 @@ int xvarsamp (VARSAMP a, double var)
 			a->ring[2 * a->idx_in + 0] = a->in[2 * i + 0];
 			a->ring[2 * a->idx_in + 1] = a->in[2 * i + 1];
 			a->inv_cvar += a->dicvar;
-			picvar = (unsigned _int64*)(&a->inv_cvar);
+			picvar = (uint64_t*)(&a->inv_cvar);
 			N = *picvar & 0xffffffffffff0000;
 			a->inv_cvar = *((double *)&N);
 			a->delta = 1.0 - a->inv_cvar;

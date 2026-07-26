@@ -2,7 +2,7 @@
 
 This file is part of a program that implements a Software-Defined Radio.
 
-Copyright (C) 2013, 2014, 2016, 2017 Warren Pratt, NR0V
+Copyright (C) 2013, 2014, 2016, 2017, 2021, 2023 Warren Pratt, NR0V
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
@@ -115,15 +115,15 @@ void create_txa (int channel)
 	txa[channel].eqp.p = create_eqp (
 		0,											// run - OFF by default
 		ch[channel].dsp_size,						// size
-		2048,										// number of filter coefficients
-		0,											// minimum phase flag
+		max(16384, ch[channel].dsp_size),			// number of filter coefficients
+		1,											// minimum phase flag
 		txa[channel].midbuff,						// pointer to input buffer
 		txa[channel].midbuff,						// pointer to output buffer
 		10,											// nfreqs
 		default_F,									// vector of frequencies
 		default_G,									// vector of gain values
 		0,											// cutoff mode
-		0,											// wintype
+		2,											// wintype
 		ch[channel].dsp_rate);						// samplerate
 	}
 
@@ -146,7 +146,7 @@ void create_txa (int channel)
 		0,											// run
 		1,											// position
 		ch[channel].dsp_size,						// size
-		2048,										// number of filter coefficients
+		max(2048, ch[channel].dsp_size),			// number of filter coefficients
 		0,											// minimum phase flag
 		txa[channel].midbuff,						// input buffer
 		txa[channel].midbuff,						// output buffer,
@@ -199,25 +199,28 @@ void create_txa (int channel)
 	double default_F[5] = {200.0, 1000.0, 2000.0, 3000.0, 4000.0};
 	double default_G[5] = {0.0, 5.0, 10.0, 10.0, 5.0};
 	double default_E[5] = {7.0, 7.0, 7.0, 7.0, 7.0};
-	txa[channel].cfcomp.p = create_cfcomp (
+	txa[channel].cfcomp.p = create_cfcomp(
 		0,											// run
 		0,											// position
 		0,											// post-equalizer run
 		ch[channel].dsp_size,						// size
 		txa[channel].midbuff,						// input buffer
 		txa[channel].midbuff,						// output buffer
-		2048,										// fft size
+		max(16384, ch[channel].dsp_size),			// fft size
 		4,											// overlap
 		ch[channel].dsp_rate,						// samplerate
 		1,											// window type
 		0,											// compression method
-		5,											// nfreqs
+		5,											// nfreqsG
+		5,                                          // nfreqsE
 		0.0,										// pre-compression
 		0.0,										// pre-postequalization
-		default_F,									// frequency array
+		default_F,									// compressor frequency array
 		default_G,									// compression array
+		default_F,									// post-eq frequency array
 		default_E,									// eq array
-		0.25);										// metering time constant
+		0.25,										// metering time constant
+		0.50);										// display time constant
 	}
 
 	txa[channel].cfcmeter.p = create_meter (	
@@ -239,7 +242,7 @@ void create_txa (int channel)
 		1,											// always runs
 		0,											// position
 		ch[channel].dsp_size,						// size
-		2048,										// number of coefficients
+		max(2048, ch[channel].dsp_size),			// number of coefficients
 		0,											// flag for minimum phase
 		txa[channel].midbuff,						// pointer to input buffer
 		txa[channel].midbuff,						// pointer to output buffer 
@@ -260,7 +263,7 @@ void create_txa (int channel)
 		0,											// ONLY RUNS WHEN COMPRESSOR IS USED
 		0,											// position
 		ch[channel].dsp_size,						// size
-		2048,										// number of coefficients
+		max(2048, ch[channel].dsp_size),			// number of coefficients
 		0,											// flag for minimum phase
 		txa[channel].midbuff,						// pointer to input buffer
 		txa[channel].midbuff,						// pointer to output buffer 
@@ -282,7 +285,7 @@ void create_txa (int channel)
 		0,											// ONLY RUNS WHEN COMPRESSOR IS USED
 		0,											// position
 		ch[channel].dsp_size,						// size
-		2048,										// number of coefficients
+		max(2048, ch[channel].dsp_size),			// number of coefficients
 		0,											// flag for minimum phase
 		txa[channel].midbuff,						// pointer to input buffer
 		txa[channel].midbuff,						// pointer to output buffer 
@@ -354,7 +357,7 @@ void create_txa (int channel)
 		0.10,										// ctcss level
 		100.0,										// ctcss frequency
 		1,											// run bandpass filter
-		2048,										// number coefficients for bandpass filter
+		max(2048, ch[channel].dsp_size),			// number coefficients for bandpass filter
 		0);											// minimum phase flag
 	
 	txa[channel].gen1.p = create_gen (
@@ -401,39 +404,28 @@ void create_txa (int channel)
 		16384,										// fft size for spectrum
 		1);											// specmode
 
-	txa[channel].calcc.p = create_calcc (			
+	txa[channel].calcc.p = create_calcc(
 		channel,									// channel number
 		1,											// run calibration
 		1024,										// input buffer size
 		ch[channel].in_rate,						// samplerate
-		16,											// ints
-		256,										// spi
 		(1.0 / 0.4072),								// hw_scale
 		0.1,										// mox delay
 		0.0,										// loop delay
-		0.8,										// ptol
-		0,											// mox
-		0,											// solidmox
-		1,											// pin mode
-		1,											// map mode
-		0,											// stbl mode
-		256,										// pin samples
-		0.9);										// alpha
+		0);											// mox
 
-	txa[channel].iqc.p0 = txa[channel].iqc.p1 = create_iqc (
+	txa[channel].iqc.p = create_iqc(
 		0,											// run
 		ch[channel].dsp_size,						// size
 		txa[channel].midbuff,						// input buffer
 		txa[channel].midbuff,						// output buffer
 		(double)ch[channel].dsp_rate,				// sample rate
-		16,											// ints
-		0.005,										// changeover time
-		256);										// spi
+		0.005);										// changeover time
 
 	txa[channel].cfir.p = create_cfir(
 		0,											// run
 		ch[channel].dsp_size,						// size
-		2048,										// number of filter coefficients
+		max(2048, ch[channel].dsp_size),			// number of filter coefficients
 		0,											// minimum phase flag
 		txa[channel].midbuff,						// input buffer
 		txa[channel].midbuff,						// output buffer
@@ -443,7 +435,7 @@ void create_txa (int channel)
 		640,										// CIC interpolation factor
 		5,											// CIC integrator-comb pairs
 		20000.0,									// cutoff frequency
-		0,											// fourth-power rolloff
+		2,											// brick-wall windowed rolloff
 		0.0,										// raised-cosine transition width
 		0);											// window type
 
@@ -483,8 +475,8 @@ void destroy_txa (int channel)
 	destroy_meter (txa[channel].outmeter.p);
 	destroy_resample (txa[channel].rsmpout.p);
 	destroy_cfir(txa[channel].cfir.p);
-	destroy_iqc (txa[channel].iqc.p0);
 	destroy_calcc (txa[channel].calcc.p);
+	destroy_iqc (txa[channel].iqc.p);
 	destroy_siphon (txa[channel].sip1.p);
 	destroy_meter (txa[channel].alcmeter.p);
 	destroy_uslew (txa[channel].uslew.p);
@@ -547,12 +539,13 @@ void flush_txa (int channel)
 	flush_uslew (txa[channel].uslew.p);
 	flush_meter (txa[channel].alcmeter.p);
 	flush_siphon (txa[channel].sip1.p);
-	flush_iqc (txa[channel].iqc.p0);
+	flush_iqc (txa[channel].iqc.p);
 	flush_cfir(txa[channel].cfir.p);
 	flush_resample (txa[channel].rsmpout.p);
 	flush_meter (txa[channel].outmeter.p);
 }
 
+//void xsnoop(channel);
 void xtxa (int channel)
 {
 	xresample (txa[channel].rsmpin.p);				// input resampler
@@ -583,8 +576,9 @@ void xtxa (int channel)
 	xuslew (txa[channel].uslew.p);					// up-slew for AM, FM, and gens
 	xmeter (txa[channel].alcmeter.p);				// ALC Meter
 	xsiphon (txa[channel].sip1.p, 0);				// siphon data for display
-	xiqc (txa[channel].iqc.p0);						// PureSignal correction
+	xiqc (txa[channel].iqc.p);						// PureSignal correction
 	xcfir(txa[channel].cfir.p);						// compensating FIR filter (used Protocol_2 only)
+	//xsnoop(channel);
 	xresample (txa[channel].rsmpout.p);				// output resampler
 	xmeter (txa[channel].outmeter.p);				// output meter
 	// print_peak_env ("env_exception.txt", ch[channel].dsp_outsize, txa[channel].outbuff, 0.7);
@@ -656,7 +650,7 @@ void setDSPSamplerate_txa (int channel)
 	setSamplerate_uslew (txa[channel].uslew.p, ch[channel].dsp_rate);
 	setSamplerate_meter (txa[channel].alcmeter.p, ch[channel].dsp_rate);
 	setSamplerate_siphon (txa[channel].sip1.p, ch[channel].dsp_rate);
-	setSamplerate_iqc (txa[channel].iqc.p0, ch[channel].dsp_rate);
+	setSamplerate_iqc (txa[channel].iqc.p, ch[channel].dsp_rate);
 	setSamplerate_cfir (txa[channel].cfir.p, ch[channel].dsp_rate);
 	// output resampler
 	setBuffers_resample (txa[channel].rsmpout.p, txa[channel].midbuff, txa[channel].outbuff);
@@ -730,8 +724,8 @@ void setDSPBuffsize_txa (int channel)
 	setSize_meter (txa[channel].alcmeter.p, ch[channel].dsp_size);
 	setBuffers_siphon (txa[channel].sip1.p, txa[channel].midbuff);
 	setSize_siphon (txa[channel].sip1.p, ch[channel].dsp_size);
-	setBuffers_iqc (txa[channel].iqc.p0, txa[channel].midbuff, txa[channel].midbuff);
-	setSize_iqc (txa[channel].iqc.p0, ch[channel].dsp_size);
+	setBuffers_iqc (txa[channel].iqc.p, txa[channel].midbuff, txa[channel].midbuff);
+	setSize_iqc (txa[channel].iqc.p, ch[channel].dsp_size);
 	setBuffers_cfir (txa[channel].cfir.p, txa[channel].midbuff, txa[channel].midbuff);
 	setSize_cfir (txa[channel].cfir.p, ch[channel].dsp_size);
 	// output resampler
@@ -910,9 +904,9 @@ void TXASetNC (int channel, int nc)
 {
 	int oldstate = SetChannelState (channel, 0, 1);
 	SetTXABandpassNC			(channel, nc);
-	// SetTXAFMEmphNC				(channel, nc);
-	// SetTXAEQNC					(channel, nc);
+	SetTXAFMEmphNC				(channel, nc);
 	SetTXAFMNC					(channel, nc);
+	SetTXACFIRNC				(channel, nc);
 	SetChannelState (channel, oldstate, 0);
 }
 
@@ -921,6 +915,12 @@ void TXASetMP (int channel, int mp)
 {
 	SetTXABandpassMP			(channel, mp);
 	SetTXAFMEmphMP				(channel, mp);
-	SetTXAEQMP					(channel, mp);
 	SetTXAFMMP					(channel, mp);
+}
+
+PORT
+void SetTXAFMAFFilter (int channel, double low, double high)
+{
+	SetTXAFMPreEmphFreqs (channel, low, high);
+	SetTXAFMAFFreqs (channel, low, high);
 }

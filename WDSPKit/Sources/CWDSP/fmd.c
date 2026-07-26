@@ -2,7 +2,7 @@
 
 This file is part of a program that implements a Software-Defined Radio.
 
-Copyright (C) 2013 Warren Pratt, NR0V
+Copyright (C) 2013, 2023 Warren Pratt, NR0V
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
@@ -45,10 +45,36 @@ void calc_fmd (FMD a)
 	a->again = a->rate / (a->deviation * TWOPI);
 	// CTCSS Removal
 	a->sntch = create_snotch(1, a->size, a->out, a->out, (int)a->rate, a->ctcss_freq, 0.0002);
+	// detector limiter
+	a->plim = create_wcpagc (
+		1,											// run - always ON
+		5,											// mode
+		1,											// 0 for max(I,Q), 1 for envelope
+		a->out,										// input buff pointer
+		a->out,										// output buff pointer
+		a->size,									// io_buffsize
+		(int)a->rate,								// sample rate
+		0.001,										// tau_attack
+		0.008,										// tau_decay
+		4,											// n_tau
+		a->lim_gain,								// max_gain (sets threshold, initial value)
+		1.0,										// var_gain / slope
+		1.0,										// fixed_gain
+		1.0,										// max_input
+		0.9,										// out_targ
+		0.250,										// tau_fast_backaverage
+		0.004,										// tau_fast_decay
+		4.0,										// pop_ratio
+		0,											// hang_enable
+		0.500,										// tau_hang_backmult
+		0.500,										// hangtime
+		2.000,										// hang_thresh
+		0.100);										// tau_hang_decay
 }
 
 void decalc_fmd (FMD a)
 {
+	destroy_wcpagc(a->plim);
 	destroy_snotch(a->sntch);
 }
 
@@ -77,15 +103,18 @@ FMD create_fmd( int run, int size, double* in, double* out, int rate, double dev
 	a->mp_de = mp_de;
 	a->nc_aud = nc_aud;
 	a->mp_aud = mp_aud;
+	a->lim_run = 0;
+	a->lim_pre_gain = 0.4;
+	a->lim_gain = 2.5;
 	calc_fmd (a);
 	// de-emphasis filter
 	a->audio = (double *) malloc0 (a->size * sizeof (complex));
 	impulse = fc_impulse (a->nc_de, a->f_low, a->f_high, +20.0 * log10(a->f_high / a->f_low), 0.0, 1, a->rate, 1.0 / (2.0 * a->size), 0, 0);
-	a->pde = create_fircore (a->size, a->audio, a->out, a->nc_de, a->mp_de, impulse);
+	a->pde = create_fircore (a->size, a->audio, a->out, a->nc_de, a->mp_de, 4, impulse);
 	_aligned_free (impulse);
 	// audio filter
 	impulse = fir_bandpass(a->nc_aud, 0.8 * a->f_low, 1.1 * a->f_high, a->rate, 0, 1, a->afgain / (2.0 * a->size));
-	a->paud = create_fircore (a->size, a->out, a->out, a->nc_aud, a->mp_aud, impulse);
+	a->paud = create_fircore (a->size, a->out, a->out, a->nc_aud, a->mp_aud, 4, impulse);
 	_aligned_free (impulse);
 	return a;
 }
@@ -109,6 +138,7 @@ void flush_fmd (FMD a)
 	a->omega = 0.0;
 	a->fmdc = 0.0;
 	flush_snotch (a->sntch);
+	flush_wcpagc (a->plim);
 }
 
 void xfmd (FMD a)
@@ -146,6 +176,12 @@ void xfmd (FMD a)
 		xfircore (a->paud);
 		// CTCSS Removal
 		xsnotch (a->sntch);
+		if (a->lim_run)
+		{
+			for (i = 0; i < 2 * a->size; i++)
+				a->out[i] *= a->lim_pre_gain;
+			xwcpagc (a->plim);
+		}
 	}
 	else if (a->in != a->out)
 		memcpy (a->out, a->in, a->size * sizeof (complex));
@@ -159,6 +195,7 @@ void setBuffers_fmd (FMD a, double* in, double* out)
 	calc_fmd (a);
 	setBuffers_fircore (a->pde,  a->audio, a->out);
 	setBuffers_fircore (a->paud, a->out, a->out);
+	setBuffers_wcpagc (a->plim, a->out, a->out);
 }
 
 void setSamplerate_fmd (FMD a, int rate)
@@ -175,6 +212,7 @@ void setSamplerate_fmd (FMD a, int rate)
 	impulse = fir_bandpass(a->nc_aud, 0.8 * a->f_low, 1.1 * a->f_high, a->rate, 0, 1, a->afgain / (2.0 * a->size));
 	setImpulse_fircore (a->paud, impulse, 1);
 	_aligned_free (impulse);
+	setSamplerate_wcpagc (a->plim, (int)a->rate);
 }
 
 void setSize_fmd (FMD a, int size)
@@ -188,13 +226,14 @@ void setSize_fmd (FMD a, int size)
 	// de-emphasis filter
 	destroy_fircore (a->pde);
 	impulse = fc_impulse (a->nc_de, a->f_low, a->f_high, +20.0 * log10(a->f_high / a->f_low), 0.0, 1, a->rate, 1.0 / (2.0 * a->size), 0, 0);
-	a->pde = create_fircore (a->size, a->audio, a->out, a->nc_de, a->mp_de, impulse);
+	a->pde = create_fircore (a->size, a->audio, a->out, a->nc_de, a->mp_de, 4, impulse);
 	_aligned_free (impulse);
 	// audio filter
 	destroy_fircore (a->paud);
 	impulse = fir_bandpass(a->nc_aud, 0.8 * a->f_low, 1.1 * a->f_high, a->rate, 0, 1, a->afgain / (2.0 * a->size));
-	a->paud = create_fircore (a->size, a->out, a->out, a->nc_aud, a->mp_aud, impulse);
+	a->paud = create_fircore (a->size, a->out, a->out, a->nc_aud, a->mp_aud, 4, impulse);
 	_aligned_free (impulse);
+	setSize_wcpagc (a->plim, a->size);
 }
 
 /********************************************************************************************************
@@ -292,4 +331,54 @@ void SetRXAFMMPaud (int channel, int mp)
 		a->mp_aud = mp;
 		setMp_fircore (a->paud, a->mp_aud);
 	}
+}
+
+PORT
+void SetRXAFMLimRun (int channel, int run)
+{
+	FMD a;
+	a = rxa[channel].fmd.p;
+	EnterCriticalSection(&ch[channel].csDSP);
+	if (a->lim_run != run)
+	{
+		a->lim_run = run;
+	}
+	LeaveCriticalSection(&ch[channel].csDSP);
+}
+
+PORT
+void SetRXAFMLimGain (int channel, double gaindB)
+{
+	double gain = pow(10.0, gaindB / 20.0);
+	FMD a = rxa[channel].fmd.p;
+	EnterCriticalSection(&ch[channel].csDSP);
+	if (a->lim_gain != gain)
+	{
+		decalc_fmd(a);
+		a->lim_gain = gain;
+		calc_fmd(a);
+	}
+	LeaveCriticalSection(&ch[channel].csDSP);
+}
+
+PORT
+void SetRXAFMAFFilter(int channel, double low, double high)
+{
+	FMD a = rxa[channel].fmd.p;
+	double* impulse;
+	EnterCriticalSection(&ch[channel].csDSP);
+	if (a->f_low != low || a->f_high != high)
+	{
+		a->f_low = low;
+		a->f_high = high;
+		// de-emphasis filter
+		impulse = fc_impulse (a->nc_de, a->f_low, a->f_high, +20.0 * log10(a->f_high / a->f_low), 0.0, 1, a->rate, 1.0 / (2.0 * a->size), 0, 0);
+		setImpulse_fircore (a->pde, impulse, 1);
+		_aligned_free (impulse);
+		// audio filter
+		impulse = fir_bandpass (a->nc_aud, 0.8 * a->f_low, 1.1 * a->f_high, a->rate, 0, 1, a->afgain / (2.0 * a->size));
+		setImpulse_fircore (a->paud, impulse, 1);
+		_aligned_free (impulse);
+	}
+	LeaveCriticalSection(&ch[channel].csDSP);
 }

@@ -2,7 +2,7 @@
 
 This file is part of a program that implements a Software-Defined Radio.
 
-Copyright (C) 2013, 2014, 2015, 2016 Warren Pratt, NR0V
+Copyright (C) 2013, 2014, 2015, 2016, 2025, 2026 Warren Pratt, NR0V
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
@@ -41,7 +41,8 @@ enum rxaMode
 	RXA_SPEC,
 	RXA_DIGL,
 	RXA_SAM,
-	RXA_DRM
+	RXA_DRM,
+	RXA_WBFM = 12
 };
 
 enum rxaMeterType
@@ -74,8 +75,12 @@ struct _rxa
 	} shift;
 	struct
 	{
+		HBResampler p;
+	} rsmpin;
+	struct
+	{
 		RESAMPLE p;
-	} rsmpin, rsmpout;
+	} rsmpout;
 	struct
 	{
 		GEN p;
@@ -114,6 +119,10 @@ struct _rxa
 	} amd;
 	struct
 	{
+		WBFM p;
+	} wbfm;
+	struct
+	{
 		FMD p;
 	} fmd;
 	struct
@@ -146,6 +155,22 @@ struct _rxa
 	} agc;
 	struct
 	{
+		APFSHADOW p;
+	} apfshadow;
+	struct
+	{
+		DOUBLEPOLE p;
+	} doublepole;
+	struct
+	{
+		MATCHED p;
+	} matched;
+	struct
+	{
+		GAUSSIAN p;
+	} gaussian;
+	struct
+	{
 		SPEAK p;
 	} speak;
 	struct
@@ -164,7 +189,10 @@ struct _rxa
 	{
 		CBL p;
 	} cbl;
-
+	struct
+	{
+		SSQL p;
+	} ssql;
 };
 
 extern struct _rxa rxa[];

@@ -25,6 +25,9 @@ john.d.melton@googlemail.com
 
 */
 
+#ifndef wdsp_linux_port_h
+#define wdsp_linux_port_h
+
 #if defined(linux) || defined(__APPLE__)
 
 
@@ -72,15 +75,22 @@ john.d.melton@googlemail.com
 #define Sleep(ms) usleep(ms*1000)
 
 #define CreateSemaphore(a,b,c,d) LinuxCreateSemaphore(a,b,c,d)
+#define CreateSemaphoreW(a,b,c,d) LinuxCreateSemaphore(a,b,c,(char *)(d))
 #define WaitForSingleObject(x, y) LinuxWaitForSingleObject(x, y)
+#define WaitForMultipleObjects(a,b,c,d) LinuxWaitForMultipleObjects(a,(void **)(b),c,d)
 #define ReleaseSemaphore(x,y,z) LinuxReleaseSemaphore(x,y,z)
 #define SetEvent(x) LinuxSetEvent(x)
+#define ResetEvent(x) LinuxResetEvent(x)
 
 #define INFINITE -1
+#define WAIT_OBJECT_0 0
+#define WAIT_TIMEOUT 0x00000102
 
 void QueueUserWorkItem(void *function,void *context,int flags);
 
 void InitializeCriticalSectionAndSpinCount(pthread_mutex_t *mutex,int count);
+
+void InitializeCriticalSection(pthread_mutex_t *mutex);
 
 void EnterCriticalSection(pthread_mutex_t *mutex);
 
@@ -89,15 +99,31 @@ void LeaveCriticalSection(pthread_mutex_t *mutex);
 void DeleteCriticalSection(pthread_mutex_t *mutex);
 
 
-sem_t *LinuxCreateSemaphore(int attributes,int initial_count,int maximum_count,char *name);
+// In-process counting semaphore (pthread mutex + condvar). WDSP's Windows
+// semaphores/events are all process-local, so nothing needs a kernel name.
+// Named POSIX semaphores (sem_open) are NOT usable here: the macOS App Sandbox
+// rejects global names, sem_wait on the resulting SEM_FAILED returns
+// immediately, and 2.00's persistent flushChannel worker then flushes a
+// channel that is still being created (launch crash in flush_rxa).
+typedef struct wdsp_sem {
+	pthread_mutex_t m;
+	pthread_cond_t c;
+	long count;
+} wdsp_sem_t;
 
-int LinuxWaitForSingleObject(sem_t *sem,int x);
+wdsp_sem_t *LinuxCreateSemaphore(int attributes,int initial_count,int maximum_count,char *name);
 
-void LinuxReleaseSemaphore(sem_t *sem,int release_count, int* previous_count);
+int LinuxWaitForSingleObject(wdsp_sem_t *sem,int ms);
 
-sem_t *CreateEvent(void* security_attributes,int bManualReset,int bInitialState,char* name);
+void LinuxReleaseSemaphore(wdsp_sem_t *sem,int release_count, int* previous_count);
 
-void LinuxSetEvent(sem_t* sem);
+wdsp_sem_t *CreateEvent(void* security_attributes,int bManualReset,int bInitialState,char* name);
+
+void LinuxSetEvent(wdsp_sem_t* sem);
+
+void LinuxResetEvent(wdsp_sem_t* sem);
+
+unsigned int LinuxWaitForMultipleObjects(unsigned int count, void **handles, int waitAll, int ms);
 
 HANDLE wdsp_beginthread( void( __cdecl *start_address )( void * ), unsigned stack_size, void *arglist);
 
@@ -108,4 +134,6 @@ void SetThreadPriority(HANDLE thread, int priority);
 int CloseHandle(HANDLE hObject);
 
 #endif
+
+#endif /* wdsp_linux_port_h */
 

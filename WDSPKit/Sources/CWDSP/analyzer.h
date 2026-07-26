@@ -3,7 +3,7 @@
 This file is part of a program that implements a Spectrum Analyzer
 used in conjunction with software-defined-radio hardware.
 
-Copyright (C) 2012, 2013, 2014, 2016 Warren Pratt, NR0V
+Copyright (C) 2012, 2013, 2014, 2016, 2023, 2025 Warren Pratt, NR0V
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
@@ -44,9 +44,9 @@ typedef struct _dp
 	int flip[dMAX_NUM_FFT];									// 0 for low-side LO => do NOT flip; 1 for high-side LO => FLIP
 	int clip;												// number of bins to clip off on EACH end of the sub-span fft
 															//		ASSUMES size/2 IS AN EVEN NUMBER!!!
-	int fsclipL;											// number of bins to clip off the lower end of the TOTAL SPAN
-	int fsclipH;											// number of bins to clip off the upper end of the TOTAL SPAN
-	int fscL;												//	fsclipL modulo (out_size - 2 * clip)
+	double fsclipL;											// number of intervals to clip off the lower end of the TOTAL SPAN
+	double fsclipH;											// number of intervals to clip off the upper end of the TOTAL SPAN
+	int fscL;												// fsclipL modulo (out_size - 2 * clip)
 	int fscH;												// fsclipH modulo (out_size - 2 * clip)
 	int begin_ss;											// number of first sub-span that is NOT completely clipped off
 	int end_ss;												// number of last sub-span that is NOT completely clipped off
@@ -57,6 +57,7 @@ typedef struct _dp
 	unsigned long long stitch_flag;
 	int spec_flag[dMAX_STITCH];								// flags showing if all ffts for a sub-span are done so elimination can proceed
 	double pix_per_bin;										// number of pixels per fft bin, note that this is fractional, not integral
+	double det_offset;										// offset needed in detector
 	double bin_per_pix;										// number of fft bins per pixel, this is fractional and != 1.0/pix_per_bin
 	double scale;											// output amplitude scale factor
 	double PiAlpha;											// parameter for Kaiser window function
@@ -80,7 +81,6 @@ typedef struct _dp
 	int av_out_idx[dMAX_PIXOUTS];							// output index in averaging pixel buffer ring
 	double *av_sum[dMAX_PIXOUTS];							// pointer to sum buffer for averaging
 	double *av_buff[dMAX_PIXOUTS][dMAX_AVERAGE];			// pointers to ring of buffers to hold pixel frames for averaging
-	double *pre_av_sum;
 	double *pre_av_out;
 	int av_mode[dMAX_PIXOUTS];
 	double av_backmult[dMAX_PIXOUTS];						// back multiplier for weighted averaging
@@ -100,7 +100,7 @@ typedef struct _dp
 	volatile LONG *pnum_threads;							// pointer to current number of active worker threads
 	int stop;												// when set, fft threads will be returned to the pool
 	int end_dispatcher;										// set this flag to one to destroy the dispatcher thread
-	int dispatcher;											// one if the dispatcher thread is alive & active
+	volatile int dispatcher;								// one if the dispatcher thread is alive & active
 	int ss;													// sub-span being processed
 	int LO;													// LO (within current sub-span) being processed 
 	int flag;
@@ -135,9 +135,29 @@ typedef struct _dp
 	double norm_oneHz;										// dB factor to normalize to one Hz bandwidth
 	int sample_rate;										// sample rate; used for normalization calculations
 	int normalize[dMAX_PIXOUTS];
+
+	// BEGIN CODE TO GET MAX FFT_BIN WITHIN A FREQUENCY RANGE
+	int dmb_run;
+	int dmb_disp;
+	int dmb_ss;
+	int dmb_LO;
+	double dmb_rate;
+	double dmb_fLow;
+	double dmb_fHigh;
+	double dmb_tau;
+	int dmb_frame_rate;
+	int dmb_begin0;
+	int dmb_end0;
+	int dmb_begin1;
+	int dmb_end1;
+	double dmb_decay;
+	double dmb_max_dB;
+	CRITICAL_SECTION cs_dmb;
+	// END CODE TO GET MAX FFT_BIN WITHIN A FREQUENCY RANGE
+
 }  dp, *DP;
 
-extern DP pdisp[];									// array of pointers to instance data
+extern DP pdisp[];
 
 extern __declspec( dllexport )
 void CreateAnalyzer (	int disp,
@@ -183,5 +203,13 @@ void SnapSpectrum(	int disp,
 					int ss,
 					int LO,
 					double *snap_buff);
+
+extern __declspec( dllexport )
+void SnapSpectrumTimeout (int disp,
+	                      int ss,
+	                      int LO,
+	                      double* snap_buff,
+	                      DWORD timeout,
+	                      int* flag);
 
 #endif

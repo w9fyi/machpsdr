@@ -2,7 +2,7 @@
 
 This file is part of a program that implements a Software-Defined Radio.
 
-Copyright (C) 2014 Warren Pratt, NR0V
+Copyright (C) 2014, 2022, 2023, 2026 Warren Pratt, NR0V
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
@@ -190,8 +190,7 @@ void calc_speak (SPEAK a)
 			break;
 		default:
 			bw_parm = 1.0;
-			bw_corr  = 1.0;
-			g_corr = 1.0;
+			bw_corr = 1.0;
 			A = 2.5;
 			f_min = 50.0;
 			break;
@@ -320,7 +319,7 @@ void setSize_speak (SPEAK a, int size)
 ********************************************************************************************************/
 
 PORT
-void SetRXASPCWRun (int channel, int run)
+void SetRXABiQuadRun (int channel, int run)
 {
 	SPEAK a = rxa[channel].speak.p;
 	EnterCriticalSection (&a->cs_update);
@@ -329,7 +328,7 @@ void SetRXASPCWRun (int channel, int run)
 }
 
 PORT
-void SetRXASPCWFreq (int channel, double freq)
+void SetRXABiQuadFreq (int channel, double freq)
 {
 	SPEAK a = rxa[channel].speak.p;
 	EnterCriticalSection (&a->cs_update);
@@ -339,7 +338,7 @@ void SetRXASPCWFreq (int channel, double freq)
 }
 
 PORT
-void SetRXASPCWBandwidth (int channel, double bw)
+void SetRXABiQuadBandwidth (int channel, double bw)
 {
 	SPEAK a = rxa[channel].speak.p;
 	EnterCriticalSection (&a->cs_update);
@@ -349,7 +348,7 @@ void SetRXASPCWBandwidth (int channel, double bw)
 }
 
 PORT
-void SetRXASPCWGain (int channel, double gain)
+void SetRXABiQuadGain (int channel, double gain)
 {
 	SPEAK a = rxa[channel].speak.p;
 	EnterCriticalSection (&a->cs_update);
@@ -550,26 +549,495 @@ void SetRXAmpeakFilGain (int channel, int fil, double gain)
 
 /********************************************************************************************************
 *																										*
-*										    Phase Rotator												*
+*									Complex Bi-Quad Low-Pass				     						*
 *																										*
 ********************************************************************************************************/
 
-void calc_phrot (PHROT a)
+void calc_bqlp(BQLP a)
 {
-	double g;
-	a->x0 = (double *) malloc0 (a->nstages * sizeof (double));
-	a->x1 = (double *) malloc0 (a->nstages * sizeof (double));
-	a->y0 = (double *) malloc0 (a->nstages * sizeof (double));
-	a->y1 = (double *) malloc0 (a->nstages * sizeof (double));
-	g = tan (PI * a->fc / (double)a->rate);
-	a->b0 = (g - 1.0) / (g + 1.0);
-	a->b1 = 1.0;
-	a->a1 = a->b0;
+	double w0, cs, c, den;
+	w0 = TWOPI * a->fc / (double)a->rate;
+	cs = cos(w0);
+	c = sin(w0) / (2.0 * a->Q);
+	den = 1.0 + c;
+	a->a0 = 0.5 * (1.0 - cs) / den;
+	a->a1 = (1.0 - cs) / den;
+	a->a2 = 0.5 * (1.0 - cs) / den;
+	a->b1 = 2.0 * cs / den;
+	a->b2 = (c - 1.0) / den;
+	flush_bqlp(a);
 }
 
-PHROT create_phrot (int run, int size, double* in, double* out, int rate, double fc, int nstages)
+BQLP create_bqlp(int run, int size, double* in, double* out, double rate, double fc, double Q, double gain, int nstages)
 {
-	PHROT a = (PHROT) malloc0 (sizeof (phrot));
+	BQLP a = (BQLP)malloc0(sizeof(bqlp));
+	a->run = run;
+	a->size = size;
+	a->in = in;
+	a->out = out;
+	a->rate = rate;
+	a->fc = fc;
+	a->Q = Q;
+	a->gain = gain;
+	a->nstages = nstages;
+	a->x0 = (double*)malloc0(a->nstages * sizeof(complex));
+	a->x1 = (double*)malloc0(a->nstages * sizeof(complex));
+	a->x2 = (double*)malloc0(a->nstages * sizeof(complex));
+	a->y0 = (double*)malloc0(a->nstages * sizeof(complex));
+	a->y1 = (double*)malloc0(a->nstages * sizeof(complex));
+	a->y2 = (double*)malloc0(a->nstages * sizeof(complex));
+	InitializeCriticalSectionAndSpinCount(&a->cs_update, 2500);
+	calc_bqlp(a);
+	return a;
+}
+
+void destroy_bqlp(BQLP a)
+{
+	DeleteCriticalSection(&a->cs_update);
+	_aligned_free(a->y2);
+	_aligned_free(a->y1);
+	_aligned_free(a->y0);
+	_aligned_free(a->x2);
+	_aligned_free(a->x1);
+	_aligned_free(a->x0);
+	_aligned_free(a);
+}
+
+void flush_bqlp(BQLP a)
+{
+	int i;
+	for (i = 0; i < a->nstages; i++)
+	{
+		a->x1[2 * i + 0] = a->x2[2 * i + 0] = a->y1[2 * i + 0] = a->y2[2 * i + 0] = 0.0;
+		a->x1[2 * i + 1] = a->x2[2 * i + 1] = a->y1[2 * i + 1] = a->y2[2 * i + 1] = 0.0;
+	}
+}
+
+void xbqlp(BQLP a)
+{
+	EnterCriticalSection(&a->cs_update);
+	if (a->run)
+	{
+		int i, j, n;
+		for (i = 0; i < a->size; i++)
+		{
+			for (j = 0; j < 2; j++)
+			{
+				a->x0[j] = a->gain * a->in[2 * i + j];
+				for (n = 0; n < a->nstages; n++)
+				{
+					if (n > 0) a->x0[2 * n + j] = a->y0[2 * (n - 1) + j];
+					a->y0[2 * n + j] = a->a0 * a->x0[2 * n + j]
+						+ a->a1 * a->x1[2 * n + j]
+						+ a->a2 * a->x2[2 * n + j]
+						+ a->b1 * a->y1[2 * n + j]
+						+ a->b2 * a->y2[2 * n + j];
+					a->y2[2 * n + j] = a->y1[2 * n + j];
+					a->y1[2 * n + j] = a->y0[2 * n + j];
+					a->x2[2 * n + j] = a->x1[2 * n + j];
+					a->x1[2 * n + j] = a->x0[2 * n + j];
+				}
+				a->out[2 * i + j] = a->y0[2 * (a->nstages - 1) + j];
+			}
+		}
+	}
+	else if (a->out != a->in)
+		memcpy(a->out, a->in, a->size * sizeof(complex));
+	LeaveCriticalSection(&a->cs_update);
+}
+
+void setBuffers_bqlp(BQLP a, double* in, double* out)
+{
+	a->in = in;
+	a->out = out;
+}
+
+void setSamplerate_bqlp(BQLP a, int rate)
+{
+	a->rate = rate;
+	calc_bqlp(a);
+}
+
+void setSize_bqlp(BQLP a, int size)
+{
+	a->size = size;
+	flush_bqlp(a);
+}
+
+/********************************************************************************************************
+*																										*
+*									   Double Bi-Quad Low-Pass				     						*
+*																										*
+********************************************************************************************************/
+
+void calc_dbqlp(BQLP a)
+{
+	double w0, cs, c, den;
+	w0 = TWOPI * a->fc / (double)a->rate;
+	cs = cos(w0);
+	c = sin(w0) / (2.0 * a->Q);
+	den = 1.0 + c;
+	a->a0 = 0.5 * (1.0 - cs) / den;
+	a->a1 = (1.0 - cs) / den;
+	a->a2 = 0.5 * (1.0 - cs) / den;
+	a->b1 = 2.0 * cs / den;
+	a->b2 = (c - 1.0) / den;
+	flush_dbqlp(a);
+}
+
+BQLP create_dbqlp(int run, int size, double* in, double* out, double rate, double fc, double Q, double gain, int nstages)
+{
+	BQLP a = (BQLP)malloc0(sizeof(bqlp));
+	a->run = run;
+	a->size = size;
+	a->in = in;
+	a->out = out;
+	a->rate = rate;
+	a->fc = fc;
+	a->Q = Q;
+	a->gain = gain;
+	a->nstages = nstages;
+	a->x0 = (double*)malloc0(a->nstages * sizeof(double));
+	a->x1 = (double*)malloc0(a->nstages * sizeof(double));
+	a->x2 = (double*)malloc0(a->nstages * sizeof(double));
+	a->y0 = (double*)malloc0(a->nstages * sizeof(double));
+	a->y1 = (double*)malloc0(a->nstages * sizeof(double));
+	a->y2 = (double*)malloc0(a->nstages * sizeof(double));
+	InitializeCriticalSectionAndSpinCount(&a->cs_update, 2500);
+	calc_dbqlp(a);
+	return a;
+}
+
+void destroy_dbqlp(BQLP a)
+{
+	DeleteCriticalSection(&a->cs_update);
+	_aligned_free(a->y2);
+	_aligned_free(a->y1);
+	_aligned_free(a->y0);
+	_aligned_free(a->x2);
+	_aligned_free(a->x1);
+	_aligned_free(a->x0);
+	_aligned_free(a);
+}
+
+void flush_dbqlp(BQLP a)
+{
+	int i;
+	for (i = 0; i < a->nstages; i++)
+	{
+		a->x1[i] = a->x2[i] = a->y1[i] = a->y2[i] = 0.0;
+	}
+}
+
+void xdbqlp(BQLP a)
+{
+	EnterCriticalSection(&a->cs_update);
+	if (a->run)
+	{
+		int i, n;
+		for (i = 0; i < a->size; i++)
+		{
+			a->x0[0] = a->gain * a->in[i];
+			for (n = 0; n < a->nstages; n++)
+			{
+				if (n > 0) a->x0[n] = a->y0[n - 1];
+				a->y0[n] = a->a0 * a->x0[n]
+					+ a->a1 * a->x1[n]
+					+ a->a2 * a->x2[n]
+					+ a->b1 * a->y1[n]
+					+ a->b2 * a->y2[n];
+				a->y2[n] = a->y1[n];
+				a->y1[n] = a->y0[n];
+				a->x2[n] = a->x1[n];
+				a->x1[n] = a->x0[n];
+			}
+			a->out[i] = a->y0[a->nstages - 1];
+		}
+	}
+	else if (a->out != a->in)
+		memcpy(a->out, a->in, a->size * sizeof(double));
+	LeaveCriticalSection(&a->cs_update);
+}
+
+void setBuffers_dbqlp(BQLP a, double* in, double* out)
+{
+	a->in = in;
+	a->out = out;
+}
+
+void setSamplerate_dbqlp(BQLP a, int rate)
+{
+	a->rate = rate;
+	calc_dbqlp(a);
+}
+
+void setSize_dbqlp(BQLP a, int size)
+{
+	a->size = size;
+	flush_dbqlp(a);
+}
+
+
+/********************************************************************************************************
+*																										*
+*									Complex Bi-Quad Band-Pass				     						*
+*																										*
+********************************************************************************************************/
+
+void calc_bqbp(BQBP a)
+{
+	double f0, w0, bw, q, sn, cs, c, den;
+	bw = a->f_high - a->f_low;
+	f0 = (a->f_high + a->f_low) / 2.0;
+	q = f0 / bw;
+	w0 = TWOPI * f0 / a->rate;
+	sn = sin(w0);
+	cs = cos(w0);
+	c = sn / (2.0 * q);
+	den = 1.0 + c;
+	a->a0 = +c / den;
+	a->a1 = 0.0;
+	a->a2 = -c / den;
+	a->b1 = 2.0 * cs / den;
+	a->b2 = (c - 1.0) / den;
+	flush_bqbp(a);
+}
+
+BQBP create_bqbp(int run, int size, double* in, double* out, double rate, double f_low, double f_high, double gain, int nstages)
+{
+	BQBP a = (BQBP)malloc0(sizeof(bqbp));
+	a->run = run;
+	a->size = size;
+	a->in = in;
+	a->out = out;
+	a->rate = rate;
+	a->f_low = f_low;
+	a->f_high = f_high;
+	a->gain = gain;
+	a->nstages = nstages;
+	a->x0 = (double*)malloc0(a->nstages * sizeof(complex));
+	a->x1 = (double*)malloc0(a->nstages * sizeof(complex));
+	a->x2 = (double*)malloc0(a->nstages * sizeof(complex));
+	a->y0 = (double*)malloc0(a->nstages * sizeof(complex));
+	a->y1 = (double*)malloc0(a->nstages * sizeof(complex));
+	a->y2 = (double*)malloc0(a->nstages * sizeof(complex));
+	InitializeCriticalSectionAndSpinCount(&a->cs_update, 2500);
+	calc_bqbp(a);
+	return a;
+}
+
+void destroy_bqbp(BQBP a)
+{
+	DeleteCriticalSection(&a->cs_update);
+	_aligned_free(a->y2);
+	_aligned_free(a->y1);
+	_aligned_free(a->y0);
+	_aligned_free(a->x2);
+	_aligned_free(a->x1);
+	_aligned_free(a->x0);
+	_aligned_free(a);
+}
+
+void flush_bqbp(BQBP a)
+{
+	int i;
+	for (i = 0; i < a->nstages; i++)
+	{
+		a->x1[2 * i + 0] = a->x2[2 * i + 0] = a->y1[2 * i + 0] = a->y2[2 * i + 0] = 0.0;
+		a->x1[2 * i + 1] = a->x2[2 * i + 1] = a->y1[2 * i + 1] = a->y2[2 * i + 1] = 0.0;
+	}
+}
+
+void xbqbp(BQBP a)
+{
+	EnterCriticalSection(&a->cs_update);
+	if (a->run)
+	{
+		int i, j, n;
+		for (i = 0; i < a->size; i++)
+		{
+			for (j = 0; j < 2; j++)
+			{
+				a->x0[j] = a->gain * a->in[2 * i + j];
+				for (n = 0; n < a->nstages; n++)
+				{
+					if (n > 0) a->x0[2 * n + j] = a->y0[2 * (n - 1) + j];
+					a->y0[2 * n + j] = a->a0 * a->x0[2 * n + j]
+						+ a->a1 * a->x1[2 * n + j]
+						+ a->a2 * a->x2[2 * n + j]
+						+ a->b1 * a->y1[2 * n + j]
+						+ a->b2 * a->y2[2 * n + j];
+					a->y2[2 * n + j] = a->y1[2 * n + j];
+					a->y1[2 * n + j] = a->y0[2 * n + j];
+					a->x2[2 * n + j] = a->x1[2 * n + j];
+					a->x1[2 * n + j] = a->x0[2 * n + j];
+				}
+				a->out[2 * i + j] = a->y0[2 * (a->nstages - 1) + j];
+			}
+		}
+	}
+	else if (a->out != a->in)
+		memcpy(a->out, a->in, a->size * sizeof(complex));
+	LeaveCriticalSection(&a->cs_update);
+}
+
+void setBuffers_bqbp(BQBP a, double* in, double* out)
+{
+	a->in = in;
+	a->out = out;
+}
+
+void setSamplerate_bqbp(BQBP a, int rate)
+{
+	a->rate = rate;
+	calc_bqbp(a);
+}
+
+void setSize_bqbp(BQBP a, int size)
+{
+	a->size = size;
+	flush_bqbp(a);
+}
+
+/********************************************************************************************************
+*																										*
+*									  Double Bi-Quad Band-Pass				     						*
+*																										*
+********************************************************************************************************/
+
+void calc_dbqbp(BQBP a)
+{
+	double f0, w0, bw, q, sn, cs, c, den;
+	bw = a->f_high - a->f_low;
+	f0 = (a->f_high + a->f_low) / 2.0;
+	q = f0 / bw;
+	w0 = TWOPI * f0 / a->rate;
+	sn = sin(w0);
+	cs = cos(w0);
+	c = sn / (2.0 * q);
+	den = 1.0 + c;
+	a->a0 = +c / den;
+	a->a1 = 0.0;
+	a->a2 = -c / den;
+	a->b1 = 2.0 * cs / den;
+	a->b2 = (c - 1.0) / den;
+	flush_dbqbp(a);
+}
+
+BQBP create_dbqbp(int run, int size, double* in, double* out, double rate, double f_low, double f_high, double gain, int nstages)
+{
+	BQBP a = (BQBP)malloc0(sizeof(bqbp));
+	a->run = run;
+	a->size = size;
+	a->in = in;
+	a->out = out;
+	a->rate = rate;
+	a->f_low = f_low;
+	a->f_high = f_high;
+	a->gain = gain;
+	a->nstages = nstages;
+	a->x0 = (double*)malloc0(a->nstages * sizeof(double));
+	a->x1 = (double*)malloc0(a->nstages * sizeof(double));
+	a->x2 = (double*)malloc0(a->nstages * sizeof(double));
+	a->y0 = (double*)malloc0(a->nstages * sizeof(double));
+	a->y1 = (double*)malloc0(a->nstages * sizeof(double));
+	a->y2 = (double*)malloc0(a->nstages * sizeof(double));
+	InitializeCriticalSectionAndSpinCount(&a->cs_update, 2500);
+	calc_dbqbp(a);
+	return a;
+}
+
+void destroy_dbqbp(BQBP a)
+{
+	DeleteCriticalSection(&a->cs_update);
+	_aligned_free(a->y2);
+	_aligned_free(a->y1);
+	_aligned_free(a->y0);
+	_aligned_free(a->x2);
+	_aligned_free(a->x1);
+	_aligned_free(a->x0);
+	_aligned_free(a);
+}
+
+void flush_dbqbp(BQBP a)
+{
+	int i;
+	for (i = 0; i < a->nstages; i++)
+	{
+		a->x1[i] = a->x2[i] = a->y1[i] = a->y2[i] = 0.0;
+	}
+}
+
+void xdbqbp(BQBP a)
+{
+	EnterCriticalSection(&a->cs_update);
+	if (a->run)
+	{
+		int i, n;
+		for (i = 0; i < a->size; i++)
+		{
+			a->x0[0] = a->gain * a->in[i];
+			for (n = 0; n < a->nstages; n++)
+			{
+				if (n > 0) a->x0[n] = a->y0[n - 1];
+				a->y0[n] = a->a0 * a->x0[n]
+					+ a->a1 * a->x1[n]
+					+ a->a2 * a->x2[n]
+					+ a->b1 * a->y1[n]
+					+ a->b2 * a->y2[n];
+				a->y2[n] = a->y1[n];
+				a->y1[n] = a->y0[n];
+				a->x2[n] = a->x1[n];
+				a->x1[n] = a->x0[n];
+			}
+			a->out[i] = a->y0[a->nstages - 1];
+		}
+	}
+	else if (a->out != a->in)
+		memcpy(a->out, a->in, a->size * sizeof(double));
+	LeaveCriticalSection(&a->cs_update);
+}
+
+void setBuffers_dbqbp(BQBP a, double* in, double* out)
+{
+	a->in = in;
+	a->out = out;
+}
+
+void setSamplerate_dbqbp(BQBP a, int rate)
+{
+	a->rate = rate;
+	calc_dbqbp(a);
+}
+
+void setSize_dbqbp(BQBP a, int size)
+{
+	a->size = size;
+	flush_dbqbp(a);
+}
+
+/********************************************************************************************************
+*																										*
+*								     Complex Single-Pole High-Pass				     					*
+*																										*
+********************************************************************************************************/
+
+void calc_sphp(SPHP a)
+{
+	double g;
+	a->x0 = (double*)malloc0(a->nstages * sizeof(complex));
+	a->x1 = (double*)malloc0(a->nstages * sizeof(complex));
+	a->y0 = (double*)malloc0(a->nstages * sizeof(complex));
+	a->y1 = (double*)malloc0(a->nstages * sizeof(complex));
+	g = exp(-TWOPI * a->fc / a->rate);
+	a->b0 = +0.5 * (1.0 + g);
+	a->b1 = -0.5 * (1.0 + g);
+	a->a1 = -g;
+}
+
+SPHP create_sphp(int run, int size, double* in, double* out, double rate, double fc, int nstages)
+{
+	SPHP a = (SPHP)malloc0(sizeof(sphp));
 	a->run = run;
 	a->size = size;
 	a->in = in;
@@ -577,113 +1045,180 @@ PHROT create_phrot (int run, int size, double* in, double* out, int rate, double
 	a->rate = rate;
 	a->fc = fc;
 	a->nstages = nstages;
-	InitializeCriticalSectionAndSpinCount ( &a->cs_update, 2500 );
-	calc_phrot (a);
+	InitializeCriticalSectionAndSpinCount(&a->cs_update, 2500);
+	calc_sphp(a);
 	return a;
 }
 
-void decalc_phrot (PHROT a)
+void decalc_sphp(SPHP a)
 {
-	_aligned_free (a->y1);
-	_aligned_free (a->y0);
-	_aligned_free (a->x1);
-	_aligned_free (a->x0);
+	_aligned_free(a->y1);
+	_aligned_free(a->y0);
+	_aligned_free(a->x1);
+	_aligned_free(a->x0);
 }
 
-void destroy_phrot (PHROT a)
+void destroy_sphp(SPHP a)
 {
-	decalc_phrot (a);
-	DeleteCriticalSection (&a->cs_update);
-	_aligned_free (a);
+	decalc_sphp(a);
+	DeleteCriticalSection(&a->cs_update);
+	_aligned_free(a);
 }
 
-void flush_phrot (PHROT a)
+void flush_sphp(SPHP a)
 {
-	memset (a->x0, 0, a->nstages * sizeof (double));
-	memset (a->x1, 0, a->nstages * sizeof (double));
-	memset (a->y0, 0, a->nstages * sizeof (double));
-	memset (a->y1, 0, a->nstages * sizeof (double));
+	memset(a->x0, 0, a->nstages * sizeof(complex));
+	memset(a->x1, 0, a->nstages * sizeof(complex));
+	memset(a->y0, 0, a->nstages * sizeof(complex));
+	memset(a->y1, 0, a->nstages * sizeof(complex));
 }
 
-void xphrot (PHROT a)
+void xsphp(SPHP a)
 {
-	EnterCriticalSection (&a->cs_update);
+	EnterCriticalSection(&a->cs_update);
 	if (a->run)
 	{
-		int i, n;
+		int i, j, n;
 		for (i = 0; i < a->size; i++)
 		{
-			a->x0[0] = a->in[2 * i + 0];
-			for (n = 0; n < a->nstages; n++)
+			for (j = 0; j < 2; j++)
 			{
-				if (n > 0) a->x0[n] = a->y0[n - 1];
-				a->y0[n]	= a->b0 * a->x0[n]
-							+ a->b1 * a->x1[n]
-							- a->a1 * a->y1[n];
-				a->y1[n] = a->y0[n];
-				a->x1[n] = a->x0[n];
+				a->x0[j] = a->in[2 * i + j];
+				for (n = 0; n < a->nstages; n++)
+				{
+					if (n > 0) a->x0[2 * n + j] = a->y0[2 * (n - 1) + j];
+					a->y0[2 * n + j] = a->b0 * a->x0[2 * n + j]
+						+ a->b1 * a->x1[2 * n + j]
+						- a->a1 * a->y1[2 * n + j];
+					a->y1[2 * n + j] = a->y0[2 * n + j];
+					a->x1[2 * n + j] = a->x0[2 * n + j];
+				}
+				a->out[2 * i + j] = a->y0[2 * (a->nstages - 1) + j];
 			}
-			a->out[2 * i + 0] = a->y0[a->nstages - 1];
 		}
 	}
 	else if (a->out != a->in)
-		memcpy (a->out, a->in, a->size * sizeof (complex));
-	LeaveCriticalSection (&a->cs_update);
+		memcpy(a->out, a->in, a->size * sizeof(complex));
+	LeaveCriticalSection(&a->cs_update);
 }
 
-void setBuffers_phrot (PHROT a, double* in, double* out)
+void setBuffers_sphp(SPHP a, double* in, double* out)
 {
 	a->in = in;
 	a->out = out;
 }
 
-void setSamplerate_phrot (PHROT a, int rate)
+void setSamplerate_sphp(SPHP a, int rate)
 {
-	decalc_phrot (a);
+	decalc_sphp(a);
 	a->rate = rate;
-	calc_phrot (a);
+	calc_sphp(a);
 }
 
-void setSize_phrot (PHROT a, int size)
+void setSize_sphp(SPHP a, int size)
 {
 	a->size = size;
-	flush_phrot (a);
+	flush_sphp(a);
 }
 
 /********************************************************************************************************
 *																										*
-*											TXA Properties												*
+*								     Double Single-Pole High-Pass				     					*
 *																										*
 ********************************************************************************************************/
 
-PORT
-void SetTXAPHROTRun (int channel, int run)
+void calc_dsphp(SPHP a)
 {
-	PHROT a = txa[channel].phrot.p;
-	EnterCriticalSection (&a->cs_update);
+	double g;
+	a->x0 = (double*)malloc0(a->nstages * sizeof(double));
+	a->x1 = (double*)malloc0(a->nstages * sizeof(double));
+	a->y0 = (double*)malloc0(a->nstages * sizeof(double));
+	a->y1 = (double*)malloc0(a->nstages * sizeof(double));
+	g = exp(-TWOPI * a->fc / a->rate);
+	a->b0 = +0.5 * (1.0 + g);
+	a->b1 = -0.5 * (1.0 + g);
+	a->a1 = -g;
+}
+
+SPHP create_dsphp(int run, int size, double* in, double* out, double rate, double fc, int nstages)
+{
+	SPHP a = (SPHP)malloc0(sizeof(sphp));
 	a->run = run;
-	if (a->run) flush_phrot (a);
-	LeaveCriticalSection (&a->cs_update);
-}
-
-PORT
-void SetTXAPHROTCorner (int channel, double corner)
-{
-	PHROT a = txa[channel].phrot.p;
-	EnterCriticalSection (&a->cs_update);
-	decalc_phrot (a);
-	a->fc = corner;
-	calc_phrot (a);
-	LeaveCriticalSection (&a->cs_update);
-}
-
-PORT
-void SetTXAPHROTNstages (int channel, int nstages)
-{
-	PHROT a = txa[channel].phrot.p;
-	EnterCriticalSection (&a->cs_update);
-	decalc_phrot (a);
+	a->size = size;
+	a->in = in;
+	a->out = out;
+	a->rate = rate;
+	a->fc = fc;
 	a->nstages = nstages;
-	calc_phrot (a);
-	LeaveCriticalSection (&a->cs_update);
+	InitializeCriticalSectionAndSpinCount(&a->cs_update, 2500);
+	calc_dsphp(a);
+	return a;
+}
+
+void decalc_dsphp(SPHP a)
+{
+	_aligned_free(a->y1);
+	_aligned_free(a->y0);
+	_aligned_free(a->x1);
+	_aligned_free(a->x0);
+}
+
+void destroy_dsphp(SPHP a)
+{
+	decalc_dsphp(a);
+	DeleteCriticalSection(&a->cs_update);
+	_aligned_free(a);
+}
+
+void flush_dsphp(SPHP a)
+{
+	memset(a->x0, 0, a->nstages * sizeof(double));
+	memset(a->x1, 0, a->nstages * sizeof(double));
+	memset(a->y0, 0, a->nstages * sizeof(double));
+	memset(a->y1, 0, a->nstages * sizeof(double));
+}
+
+void xdsphp(SPHP a)
+{
+	EnterCriticalSection(&a->cs_update);
+	if (a->run)
+	{
+		int i, n;
+		for (i = 0; i < a->size; i++)
+		{
+			a->x0[0] = a->in[i];
+			for (n = 0; n < a->nstages; n++)
+			{
+				if (n > 0) a->x0[n] = a->y0[n - 1];
+				a->y0[n] = a->b0 * a->x0[n]
+					+ a->b1 * a->x1[n]
+					- a->a1 * a->y1[n];
+				a->y1[n] = a->y0[n];
+				a->x1[n] = a->x0[n];
+			}
+			a->out[i] = a->y0[a->nstages - 1];
+		}
+	}
+	else if (a->out != a->in)
+		memcpy(a->out, a->in, a->size * sizeof(double));
+	LeaveCriticalSection(&a->cs_update);
+}
+
+void setBuffers_dsphp(SPHP a, double* in, double* out)
+{
+	a->in = in;
+	a->out = out;
+}
+
+void setSamplerate_dsphp(SPHP a, int rate)
+{
+	decalc_dsphp(a);
+	a->rate = rate;
+	calc_dsphp(a);
+}
+
+void setSize_dsphp(SPHP a, int size)
+{
+	a->size = size;
+	flush_dsphp(a);
 }

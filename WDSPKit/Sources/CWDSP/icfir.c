@@ -31,7 +31,7 @@ void calc_icfir (ICFIR a)
 	double* impulse;
 	a->scale = 1.0 / (double)(2 * a->size);
 	impulse = icfir_impulse (a->nc, a->DD, a->R, a->Pairs, a->runrate, a->cicrate, a->cutoff, a->xtype, a->xbw, 1, a->scale, a->wintype);
-	a->p = create_fircore (a->size, a->in, a->out, a->nc, a->mp, impulse);
+	a->p = create_fircore (a->size, a->in, a->out, a->nc, a->mp, 16, impulse);
 	_aligned_free (impulse);
 }
 
@@ -138,7 +138,7 @@ double* icfir_impulse (int N, int DD, int R, int Pairs, double runrate, double c
 	// rtype:	0 for real output, 1 for complex output
 	// scale:	scale factor to be applied to the output
 	int i, j;
-	double tmp, local_scale, ri, mag, fn;
+	double tmp, local_scale, ri, fn, mag = 1.0;
 	double* impulse;
 	double* A = (double *) malloc0 (N * sizeof (double));
 	double ft = cutoff / cicrate;										// normalized cutoff frequency

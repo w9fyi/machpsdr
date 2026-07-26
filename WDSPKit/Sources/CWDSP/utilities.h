@@ -2,7 +2,7 @@
 
 This file is part of a program that implements a Software-Defined Radio.
 
-Copyright (C) 2013, 2019 Warren Pratt, NR0V
+Copyright (C) 2013, 2019, 2024 Warren Pratt, NR0V
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
@@ -28,8 +28,6 @@ __declspec (dllexport) void *malloc0 (int size);
 
 extern void print_impulse (const char* filename, int N, double* impulse, int rtype, int pr_mode);
 
-extern __declspec (dllexport) void analyze_bandpass_filter (int N, double f_low, double f_high, double samplerate, int wintype, int rtype, double scale);
-
 void print_peak_val(const char* filename, int N, double* buff, double thresh);
 
 void print_peak_env (const char* filename, int N, double* buff, double thresh);
@@ -46,11 +44,7 @@ extern void print_window_gain (const char* filename, int wintype, double inv_coh
 
 extern void print_deviation (const char* filename, double dpmax, double rate);
 
-extern void doCalccPrintSamples(int channel);
-
 __declspec (dllexport) void print_buffer_parameters (const char* filename, int channel);
-
-extern void print_anb_parms (const char* filename, ANB a);
 
 extern void WriteAudioWDSP(double seconds, int rate, int size, double* indata, int mode, double gain);
 
@@ -59,3 +53,38 @@ extern void WriteScaledAudio (
 	int rate,				// sample rate
 	int size,				// incoming buffer size
 	double* indata );		// pointer to incoming data buffer
+
+
+#ifndef _bfcu_h
+#define _bfcu_h
+
+typedef struct _bfcu
+{
+	int id;
+	int min_size;
+	int max_size;
+	double rate;
+	double corner;
+	int points;
+	double* dataset[16];
+	int i_lower_corner;
+	int i_upper_corner;
+}bfcu, * BFCU;
+
+extern __declspec (dllexport) int create_bfcu(int id, int min_size, int max_size, double rate, double corner, int points);
+
+extern __declspec (dllexport) void destroy_bfcu(int id);
+
+extern __declspec (dllexport) void getFilterCorners(int id, int* lower_index, int* upper_index);
+
+extern __declspec (dllexport) void getFilterCurve(int id, int size, int w_type, int index_low, int index_high, double* segment);
+
+extern void test_bfcu();
+
+extern void wdsp_dprintf(const char* format, ...);
+// WDSP's debug printf; renamed to avoid clashing with POSIX dprintf(fd, ...)
+#define dprintf wdsp_dprintf
+
+extern char* uint32_to_bitstr(uint32_t n, char* buf);
+
+#endif

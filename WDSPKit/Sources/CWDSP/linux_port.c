@@ -62,6 +62,10 @@ void InitializeCriticalSectionAndSpinCount(pthread_mutex_t *mutex,int count) {
 	// ignore count
 }
 
+void InitializeCriticalSection(pthread_mutex_t *mutex) {
+	InitializeCriticalSectionAndSpinCount(mutex, 0);
+}
+
 void EnterCriticalSection(pthread_mutex_t *mutex) {
 	pthread_mutex_lock(mutex);
 }
@@ -74,70 +78,75 @@ void DeleteCriticalSection(pthread_mutex_t *mutex) {
 	pthread_mutex_destroy(mutex);
 }
 
-int LinuxWaitForSingleObject(sem_t *sem,int ms) {
-	int result=0;
-	if(ms==INFINITE) {
-		// wait for the lock
-		result=sem_wait(sem);
+wdsp_sem_t *LinuxCreateSemaphore(int attributes,int initial_count,int maximum_count,char *name) {
+	wdsp_sem_t *sem = malloc(sizeof(wdsp_sem_t));
+	pthread_mutex_init(&sem->m, NULL);
+	pthread_cond_init(&sem->c, NULL);
+	sem->count = initial_count;
+	return sem;
+}
+
+// Returns WAIT_OBJECT_0 (0) when the semaphore was acquired, WAIT_TIMEOUT otherwise.
+int LinuxWaitForSingleObject(wdsp_sem_t *sem,int ms) {
+	int acquired = 0;
+	pthread_mutex_lock(&sem->m);
+	if (ms == INFINITE) {
+		while (sem->count <= 0)
+			pthread_cond_wait(&sem->c, &sem->m);
+		acquired = 1;
+	} else if (ms == 0) {
+		acquired = (sem->count > 0);
 	} else {
-		// try to get the lock
-		result=sem_trywait(sem);
-		if(result!=0) {
-			// didn't get the lock
-			if(ms!=0) {
-				// sleep if ms not zero
-				Sleep(ms);
-				// try to get the lock again
-				result=sem_trywait(sem);
-			}
-		}
+		struct timespec deadline;
+		clock_gettime(CLOCK_REALTIME, &deadline);
+		deadline.tv_sec  += ms / 1000;
+		deadline.tv_nsec += (long)(ms % 1000) * 1000000L;
+		if (deadline.tv_nsec >= 1000000000L) { deadline.tv_sec++; deadline.tv_nsec -= 1000000000L; }
+		while (sem->count <= 0)
+			if (pthread_cond_timedwait(&sem->c, &sem->m, &deadline) != 0) break;
+		acquired = (sem->count > 0);
 	}
-	
-	return result;
+	if (acquired) sem->count--;
+	pthread_mutex_unlock(&sem->m);
+	return acquired ? WAIT_OBJECT_0 : WAIT_TIMEOUT;
 }
 
-sem_t *LinuxCreateSemaphore(int attributes,int initial_count,int maximum_count,char *name) {
-        sem_t *sem;
-#ifdef __APPLE__
-        //DL1YCF
-	//This routine is invoked with name=NULL several times, so we have to make
-	//a unique name of tpye WDSPxxxxx for each invocation.
-	static int semcount=0;
-	char sname[12];
-        sprintf(sname,"WDSP%05d",semcount++);
-	sem_unlink(sname);
-        sem=sem_open(sname, O_CREAT | O_EXCL, 0700, initial_count);
-	if (sem == SEM_FAILED) {
-	  perror("WDSP:CreateSemaphore");
+void LinuxReleaseSemaphore(wdsp_sem_t* sem,int release_count, int* previous_count) {
+	pthread_mutex_lock(&sem->m);
+	if (previous_count) *previous_count = (int)sem->count;
+	sem->count += release_count;
+	while (release_count-- > 0)
+		pthread_cond_signal(&sem->c);
+	pthread_mutex_unlock(&sem->m);
+}
+
+wdsp_sem_t *CreateEvent(void* security_attributes,int bManualReset,int bInitialState,char* name) {
+	// auto-reset event == binary semaphore; WDSP never uses manual-reset semantics
+	return LinuxCreateSemaphore(0, bInitialState ? 1 : 0, 1, 0);
+}
+
+void LinuxSetEvent(wdsp_sem_t* sem) {
+	LinuxReleaseSemaphore(sem, 1, 0);
+}
+
+void LinuxResetEvent(wdsp_sem_t* sem) {
+	// drain so the "event" reads as non-signaled
+	pthread_mutex_lock(&sem->m);
+	sem->count = 0;
+	pthread_mutex_unlock(&sem->m);
+}
+
+unsigned int LinuxWaitForMultipleObjects(unsigned int count, void **handles, int waitAll, int ms) {
+	// waitAll is not supported; WDSP only waits for "any" (calcc doPSCorrChange).
+	// Poll each semaphore; on INFINITE, sleep 1 ms between sweeps.
+	(void)waitAll;
+	for (;;) {
+		for (unsigned int i = 0; i < count; i++)
+			if (LinuxWaitForSingleObject((wdsp_sem_t *)handles[i], 0) == WAIT_OBJECT_0)
+				return WAIT_OBJECT_0 + i;
+		if (ms != INFINITE) return WAIT_TIMEOUT;
+		usleep(1000);
 	}
-#else
-        sem=malloc(sizeof(sem_t));
-	int result;
-	result=sem_init(sem, 0, 0);
-        if (result < 0) {
-	  perror("WDSP:CreateSemaphore");
-        }
-#endif
-	return sem;
-}
-
-void LinuxReleaseSemaphore(sem_t* sem,int release_count, int* previous_count) {
-	while(release_count>0) {
-		sem_post(sem);
-		release_count--;
-	}
-}
-
-sem_t *CreateEvent(void* security_attributes,int bManualReset,int bInitialState,char* name) {
-	int result;
-        sem_t *sem;
-	sem=LinuxCreateSemaphore(0,0,0,0);
-	// need to handle bManualReset and bInitialState
-	return sem;
-}
-
-void LinuxSetEvent(sem_t* sem) {
-	sem_post(sem);
 }
 
 HANDLE wdsp_beginthread( void( __cdecl *start_address )( void * ), unsigned stack_size, void *arglist) {
@@ -192,38 +201,14 @@ void SetThreadPriority(HANDLE thread, int priority)  {
 
 int CloseHandle(HANDLE hObject) {
 //
-// This routine is *ONLY* called to release semaphores
+// This routine is *ONLY* called to release semaphores/events
 //
-#ifdef __APPLE__
-//
-// A semaphore is closed and re-allocated on each RX->TX transition.
-// After about 200 RX/TX transitions, MacOS runs out of file descriptors
-// since MacOS only has named semaphores. As a consequence,
-// no new semaphores can be allocated, and other parts of the program cannot
-// open new files ore make new connections.
-// Therefore we should close the semaphore.
-//
-if (sem_close((sem_t *)hObject) < 0) {
-  perror("WDSP:CloseHandle:SemCLose");
-}
-#else
-//
-// Although the number of semaphores seems "unlimited" on RapianOS,
-// this is nevertheless a memory leak (a sem_t is allocated before
-// sem_init is called, see above).
-// So destroy the semaphore and (if this was successful) release the memory.
-//
-
-if (sem_destroy((sem_t *)hObject) < 0) {
-  perror("WDSP:CloseHandle:SemDestroy");
-} else {
-  // if sem_destroy failed, do not release storage
-  free(hObject);
-}
-#endif
-
+	wdsp_sem_t *sem = (wdsp_sem_t *)hObject;
+	pthread_cond_destroy(&sem->c);
+	pthread_mutex_destroy(&sem->m);
+	free(sem);
 // this is actually a void function (return value never used).
-return 0;
+	return 0;
 }
 
 #endif

@@ -6,7 +6,7 @@ extern "C" {
 
 #define INREAL float
 #define OUTREAL float
-#define dINREAL float
+#define dINREAL double
 
 // WDSP vesion number
 int GetWDSPVersion();
@@ -46,7 +46,7 @@ extern void fexchange2 (int channel, INREAL *Iin, INREAL *Qin, OUTREAL *Iout, OU
 extern void XCreateAnalyzer(int disp, int *success, int m_size, int m_num_fft, int m_stitch, char *app_data_path);
 extern void SetAnalyzer(int disp, int n_pixout, int n_fft, int typ, int *flp, int sz, int bf_sz, int win_type, double pi, int ovrlp, int clp, int fscLin, int fscHin, int n_pix, int n_stch, int calset, double fmin, double fmax, int max_w); 
 extern void Spectrum0(int run, int disp, int ss, int LO, double* in);
-extern void Spectrum(int disp, int ss, int LO, float* pI, float* pQ);
+extern void Spectrum(int disp, int ss, int LO, double* pI, double* pQ);
 extern void GetPixels(int disp, int pixout, float *pix, int *flag);
 extern void SetDisplayDetectorMode(int disp, int pixout, int mode);
 extern void SetDisplayAverageMode(int disp, int pixout, int mode);
@@ -78,6 +78,18 @@ extern void SetRXAEMNRRun (int channel, int run);
 extern void SetRXAEMNRgainMethod (int channel, int method);
 extern void SetRXAEMNRnpeMethod (int channel, int method);
 extern void SetRXAEMNRPosition (int channel, int position);
+// NR2 auto-enhance (artifact-elimination) tuning
+extern void SetRXAEMNRaeZetaThresh (int channel, double zetathresh);
+extern void SetRXAEMNRaePsi (int channel, double psi);
+// NR2 Trained mode (WDSP 1.25+): trained zeta-hat gain table, embedded data
+extern void SetRXAEMNRtrainZetaThresh (int channel, double thresh);
+extern void SetRXAEMNRtrainT2 (int channel, double t2);
+// NR2 psychoacoustic post-processing (WDSP 1.27+)
+extern void SetRXAEMNRpost2Run (int channel, int run);
+extern void SetRXAEMNRpost2Factor (int channel, double factor);
+extern void SetRXAEMNRpost2Nlevel (int channel, double nlevel);
+extern void SetRXAEMNRpost2Taper (int channel, int taper);
+extern void SetRXAEMNRpost2Rate (int channel, double tc);
 extern void SetRXAANFRun(int channel, int run);
 extern double GetRXAMeter (int channel, int mt);
 extern void SetRXAPanelBinaural(int channel, int bin);
@@ -277,12 +289,8 @@ extern void SetPSLoopDelay (int channel, double delay);
 extern void SetPSMoxDelay (int channel, double delay);
 extern double SetPSTXDelay (int channel, double delay);
 extern void SetPSHWPeak (int channel, double peak);
-extern void SetPSPtol (int channel, double ptol);
 extern void SetPSFeedbackRate (int channel, int rate);
-extern void SetPSIntsAndSpi (int channel, int ints, int spi);
-extern void SetPSStabilize (int channel, int stbl);
-extern void SetPSMapMode (int channel, int map);
-extern void SetPSPinMode (int channel, int pin);
+// (SetPSIntsAndSpi/SetPSStabilize/SetPSMapMode/SetPSPinMode/SetPSPtol removed in WDSP 2.00 PureSignal 3.0)
 
 extern void GetPSInfo (int channel, int *info);
 extern void GetPSHWPeak (int channel, double* peak);
@@ -339,7 +347,7 @@ extern void SetTXACTCSSFreq (int channel, double freq);
 
 // wisdom
 char *wisdom_get_status();
-extern void WDSPwisdom (char* directory);
+extern int WDSPwisdom (char* directory);
 
 #ifdef __cplusplus
 }
